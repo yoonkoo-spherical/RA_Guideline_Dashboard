@@ -22,11 +22,12 @@ def fetch_fda_guidelines(page):
     for keyword in keywords:
         url = f"https://www.fda.gov/regulatory-information/search-fda-guidance-documents?keys={keyword}"
         try:
-            # 페이지 이동 후 네트워크 통신이 끝날 때까지 대기
-            page.goto(url, wait_until="networkidle")
+            # 타임아웃 30초로 증가
+            page.goto(url, wait_until="networkidle", timeout=30000)
+            print(f" -> [DEBUG] FDA '{keyword}' Page Title: {page.title()}")
             
-            # 테이블 데이터가 렌더링될 때까지 최대 15초 대기
-            page.wait_for_selector("table tbody tr", timeout=15000)
+            # 테이블 대기 시간 30초로 증가
+            page.wait_for_selector("table tbody tr", timeout=30000)
             
             html = page.content()
             soup = BeautifulSoup(html, 'html.parser')
@@ -67,7 +68,7 @@ def fetch_ema_biosimilar_guidelines(page):
     
     guidelines = []
     try:
-        page.goto(url, wait_until="networkidle")
+        page.goto(url, wait_until="networkidle", timeout=30000)
         html = page.content()
         soup = BeautifulSoup(html, 'html.parser')
         
@@ -78,10 +79,8 @@ def fetch_ema_biosimilar_guidelines(page):
             if not title:
                 continue
                 
-            # PDF 직접 링크 또는 가이드라인 상세 문서 경로를 포함하는 링크 필터링
             href_lower = href.lower()
             if "guideline" in href_lower or "reflection-paper" in href_lower or "position-statement" in href_lower or href_lower.endswith(".pdf"):
-                # 자기 자신(목록 페이지)으로의 링크는 제외
                 if href == url or href == url.replace("https://www.ema.europa.eu", ""):
                     continue
 
@@ -96,7 +95,6 @@ def fetch_ema_biosimilar_guidelines(page):
                     "category": "biosimilar"
                 })
         
-        # URL 기준으로 중복 데이터 제거
         unique_guidelines = {doc['url']: doc for doc in guidelines}.values()
         guidelines = list(unique_guidelines)
         print(f" -> Found {len(guidelines)} unique documents from EMA")
@@ -123,10 +121,15 @@ def save_to_supabase(guidelines):
     print(f"Successfully processed {success_count} documents into Supabase.")
 
 if __name__ == "__main__":
-    # Playwright 브라우저 인스턴스 실행
     with sync_playwright() as p:
-        browser = p.chromium.launch(headless=True)
-        page = browser.new_page()
+        # 봇 탐지 우회를 위한 브라우저 실행 인자 추가
+        browser = p.chromium.launch(headless=True, args=["--disable-blink-features=AutomationControlled"])
+        
+        # 일반 크롬 브라우저와 동일한 User-Agent 설정
+        context = browser.new_context(
+            user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+        )
+        page = context.new_page()
         
         fda_docs = fetch_fda_guidelines(page)
         ema_docs = fetch_ema_biosimilar_guidelines(page)
