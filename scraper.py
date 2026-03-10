@@ -1,5 +1,5 @@
 import os
-import requests
+import cloudscraper
 from bs4 import BeautifulSoup
 from supabase import create_client, Client
 from dotenv import load_dotenv
@@ -8,31 +8,33 @@ load_dotenv()
 SUPABASE_URL = os.getenv("SUPABASE_URL")
 SUPABASE_KEY = os.getenv("SUPABASE_KEY")
 
-# Supabase 클라이언트 초기화 에러 방지
 try:
     supabase: Client = create_client(SUPABASE_URL, SUPABASE_KEY)
 except Exception as e:
     print(f"Supabase Client Error: {e}")
     exit(1)
 
-# 실제 브라우저처럼 보이기 위한 헤더 강화
-HEADERS = {
-    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
-    "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8",
-    "Accept-Language": "en-US,en;q=0.5",
-}
+# Cloudscraper 초기화 (일반 크롬 브라우저처럼 위장하여 보안 시스템 우회)
+scraper = cloudscraper.create_scraper(
+    browser={
+        'browser': 'chrome',
+        'platform': 'windows',
+        'desktop': True
+    }
+)
 
 def fetch_fda_guidelines():
     keywords = ["biosimilar", "monoclonal antibody"] 
     guidelines = []
     print("--- Starting FDA Scraping ---")
     
+    # FDA 검색 페이지 URL
+    url = "https://www.fda.gov/regulatory-information/search-fda-guidance-documents"
+    
     for keyword in keywords:
-        url = "https://www.fda.gov/regulatory-information/search-fda-guidance-documents"
         params = {"keys": keyword}
-        
         try:
-            response = requests.get(url, params=params, headers=HEADERS, timeout=15)
+            response = scraper.get(url, params=params, timeout=20)
             print(f"FDA ({keyword}) Response Status: {response.status_code}")
             
             if response.status_code == 200:
@@ -58,7 +60,7 @@ def fetch_fda_guidelines():
                             "category": keyword
                         })
             else:
-                print(f" -> Failed to fetch FDA page. Status code: {response.status_code}")
+                print(f" -> Failed. Status code: {response.status_code}")
         except Exception as e:
             print(f" -> Error during FDA scraping: {e}")
             
@@ -66,10 +68,11 @@ def fetch_fda_guidelines():
 
 def fetch_ema_biosimilar_guidelines():
     print("\n--- Starting EMA Scraping ---")
+    # EMA 바이오시밀러 가이드라인 URL
     url = "https://www.ema.europa.eu/en/human-regulatory-overview/research-development/scientific-guidelines/multidisciplinary/multidisciplinary-biosimilar"
     
     try:
-        response = requests.get(url, headers=HEADERS, timeout=15)
+        response = scraper.get(url, timeout=20)
         print(f"EMA Response Status: {response.status_code}")
         
         guidelines = []
@@ -93,7 +96,7 @@ def fetch_ema_biosimilar_guidelines():
                     "category": "biosimilar"
                 })
         else:
-            print(f" -> Failed to fetch EMA page. Status code: {response.status_code}")
+            print(f" -> Failed. Status code: {response.status_code}")
     except Exception as e:
          print(f" -> Error during EMA scraping: {e}")
          
