@@ -1,6 +1,6 @@
 import os
-import cloudscraper
 from bs4 import BeautifulSoup
+from curl_cffi import requests as curl_requests
 from supabase import create_client, Client
 from dotenv import load_dotenv
 
@@ -14,40 +14,35 @@ except Exception as e:
     print(f"Supabase Client Error: {e}")
     exit(1)
 
-# Cloudscraper 초기화 (일반 브라우저처럼 위장하여 보안 우회)
-scraper = cloudscraper.create_scraper(
-    browser={
-        'browser': 'chrome',
-        'platform': 'windows',
-        'desktop': True
-    }
-)
-
 def fetch_fda_guidelines():
     keywords = ["biosimilar", "monoclonal antibody"] 
     guidelines = []
     print("--- Starting FDA Scraping ---")
     
-    # FDA 검색 페이지 URL
     url = "https://www.fda.gov/regulatory-information/search-fda-guidance-documents"
     
     for keyword in keywords:
         params = {"keys": keyword}
         try:
-            response = scraper.get(url, params=params, timeout=20)
+            # Akamai 방화벽 우회를 위해 크롬 브라우저(chrome110)의 네트워크 특징을 모방
+            response = curl_requests.get(url, params=params, impersonate="chrome110", timeout=30)
             print(f"FDA ({keyword}) Response Status: {response.status_code}")
             
             if response.status_code == 200:
                 soup = BeautifulSoup(response.text, 'html.parser')
-                table_rows = soup.select("table.views-table tbody tr")
-                print(f" -> Found {len(table_rows)} rows for keyword '{keyword}'")
+                table_rows = soup.select("table tbody tr")
                 
+                count = 0
                 for row in table_rows:
                     cols = row.find_all("td")
                     if len(cols) >= 4:
                         title_tag = cols[0].find("a")
-                        title = title_tag.text.strip() if title_tag else "N/A"
-                        link = "https://www.fda.gov" + title_tag['href'] if title_tag else ""
+                        if not title_tag:
+                            continue
+                        
+                        title = title_tag.text.strip()
+                        href = title_tag.get('href', '')
+                        link = "https://www.fda.gov" + href if href.startswith("/") else href
                         status = cols[1].text.strip()
                         date = cols[3].text.strip()
                         
@@ -59,6 +54,8 @@ def fetch_fda_guidelines():
                             "published_date": date,
                             "category": keyword
                         })
+                        count += 1
+                print(f" -> Found {count} rows for keyword '{keyword}'")
             else:
                 print(f" -> Failed. Status code: {response.status_code}")
         except Exception as e:
@@ -68,33 +65,43 @@ def fetch_fda_guidelines():
 
 def fetch_ema_biosimilar_guidelines():
     print("\n--- Starting EMA Scraping ---")
-    # 변경된 EMA 바이오시밀러 가이드라인 URL
     url = "https://www.ema.europa.eu/en/human-regulatory-overview/research-development/scientific-guidelines/multidisciplinary-guidelines/multidisciplinary-guidelines-biosimilar"
     
     try:
-        response = scraper.get(url, timeout=20)
+        response = curl_requests.get(url, impersonate="chrome110", timeout=30)
         print(f"EMA Response Status: {response.status_code}")
         
         guidelines = []
         if response.status_code == 200:
             soup = BeautifulSoup(response.text, 'html.parser')
-            document_items = soup.select(".ecl-file") 
-            print(f" -> Found {len(document_items)} documents from EMA")
             
-            for item in document_items:
-                title_tag = item.select_one(".ecl-file__title")
-                title = title_tag.text.strip() if title_tag else "N/A"
-                link_tag = item.select_one("a")
-                link = link_tag['href'] if link_tag else ""
+            count = 0
+            # 개편된 EMA 사이트 대응: href 속성에 문서 경로가 포함된 <a> 태그 탐색
+            for a_tag in soup.find_all("a", href=True):
+                href = a_tag['href']
+                title = a_tag.text.strip()
                 
-                guidelines.append({
-                    "agency": "EMA",
-                    "title": title,
-                    "url": link,
-                    "status": "Final",
-                    "published_date": "N/A", 
-                    "category": "biosimilar"
-                })
+                if not title:
+                    continue
+                    
+                if "/documents/" in href or href.lower().endswith(".pdf"):
+                    full_url = href if href.startswith("http") else "https://www.ema.europa.eu" + href
+                    
+                    guidelines.append({
+                        "agency": "EMA",
+                        "title": title,
+                        "url": full_url,
+                        "status": "Final",
+                        "published_date": "N/A", 
+                        "category": "biosimilar"
+                    })
+                    count += 1
+            
+            # URL 기준으로 중복 문서 제거
+            unique_guidelines = {doc['url']: doc for doc in guidelines}.values()
+            guidelines = list(unique_guidelines)
+            
+            print(f" -> Found {len(guidelines)} unique documents from EMA")
         else:
             print(f" -> Failed. Status code: {response.status_code}")
     except Exception as e:
