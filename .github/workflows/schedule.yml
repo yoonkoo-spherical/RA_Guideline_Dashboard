@@ -1,0 +1,33 @@
+name: Daily Guideline Scraper
+
+on:
+  schedule:
+    # KST 기준 매일 05:00 실행 (UTC 기준 20:00)
+    - cron: '0 20 * * *'
+  workflow_dispatch: # 수동으로 실행할 수 있는 버튼 활성화
+
+jobs:
+  scrape-and-update:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: 저장소 코드 불러오기 (Checkout repo)
+        uses: actions/checkout@v3
+
+      - name: 파이썬 환경 설정 (Set up Python)
+        uses: actions/setup-python@v4
+        with:
+          python-version: '3.10' # 사용하는 파이썬 버전으로 지정
+
+      - name: 필요 패키지 설치 (Install dependencies)
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+
+      - name: 크롤링 스크립트 실행 (Run scraper)
+        env:
+          # GitHub Secrets에 저장된 변수를 스크립트의 환경 변수로 전달
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          SUPABASE_KEY: ${{ secrets.SUPABASE_KEY }}
+        run: |
+          python scraper.py
