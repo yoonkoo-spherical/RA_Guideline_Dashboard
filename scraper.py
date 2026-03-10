@@ -4,91 +4,116 @@ from bs4 import BeautifulSoup
 from supabase import create_client, Client
 from dotenv import load_dotenv
 
-# 환경 변수 로드 (Supabase 접속 정보)
 load_dotenv()
 SUPABASE_URL = os.getenv("SUPABASE_URL")
 SUPABASE_KEY = os.getenv("SUPABASE_KEY")
-supabase: Client = create_client(SUPABASE_URL, SUPABASE_KEY)
+
+# Supabase 클라이언트 초기화 에러 방지
+try:
+    supabase: Client = create_client(SUPABASE_URL, SUPABASE_KEY)
+except Exception as e:
+    print(f"Supabase Client Error: {e}")
+    exit(1)
+
+# 실제 브라우저처럼 보이기 위한 헤더 강화
+HEADERS = {
+    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+    "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8",
+    "Accept-Language": "en-US,en;q=0.5",
+}
 
 def fetch_fda_guidelines():
-    """
-    FDA 웹사이트에서 지정된 키워드 목록을 순회하며 가이드라인을 수집합니다.
-    """
-    # 검색을 원하는 키워드 리스트 (필요시 이 배열에 추가/수정)
     keywords = ["biosimilar", "monoclonal antibody"] 
     guidelines = []
+    print("--- Starting FDA Scraping ---")
     
     for keyword in keywords:
         url = "https://www.fda.gov/regulatory-information/search-fda-guidance-documents"
         params = {"keys": keyword}
-        headers = {"User-Agent": "Mozilla/5.0"}
         
-        response = requests.get(url, params=params, headers=headers)
-        soup = BeautifulSoup(response.text, 'html.parser')
-        
-        table_rows = soup.select("table.views-table tbody tr")
-        
-        for row in table_rows:
-            cols = row.find_all("td")
-            if len(cols) >= 4:
-                title_tag = cols[0].find("a")
-                title = title_tag.text.strip() if title_tag else "N/A"
-                link = "https://www.fda.gov" + title_tag['href'] if title_tag else ""
-                status = cols[1].text.strip()
-                date = cols[3].text.strip()
+        try:
+            response = requests.get(url, params=params, headers=HEADERS, timeout=15)
+            print(f"FDA ({keyword}) Response Status: {response.status_code}")
+            
+            if response.status_code == 200:
+                soup = BeautifulSoup(response.text, 'html.parser')
+                table_rows = soup.select("table.views-table tbody tr")
+                print(f" -> Found {len(table_rows)} rows for keyword '{keyword}'")
                 
-                guidelines.append({
-                    "agency": "FDA",
-                    "title": title,
-                    "url": link,
-                    "status": status,
-                    "published_date": date,
-                    "category": keyword # 검색에 사용된 키워드를 카테고리로 저장
-                })
+                for row in table_rows:
+                    cols = row.find_all("td")
+                    if len(cols) >= 4:
+                        title_tag = cols[0].find("a")
+                        title = title_tag.text.strip() if title_tag else "N/A"
+                        link = "https://www.fda.gov" + title_tag['href'] if title_tag else ""
+                        status = cols[1].text.strip()
+                        date = cols[3].text.strip()
+                        
+                        guidelines.append({
+                            "agency": "FDA",
+                            "title": title,
+                            "url": link,
+                            "status": status,
+                            "published_date": date,
+                            "category": keyword
+                        })
+            else:
+                print(f" -> Failed to fetch FDA page. Status code: {response.status_code}")
+        except Exception as e:
+            print(f" -> Error during FDA scraping: {e}")
+            
     return guidelines
 
 def fetch_ema_biosimilar_guidelines():
-    """
-    EMA 웹사이트의 Multidisciplinary: Biosimilar 섹션에서 문서를 수집합니다.
-    """
+    print("\n--- Starting EMA Scraping ---")
     url = "https://www.ema.europa.eu/en/human-regulatory-overview/research-development/scientific-guidelines/multidisciplinary/multidisciplinary-biosimilar"
-    headers = {"User-Agent": "Mozilla/5.0"}
     
-    response = requests.get(url, headers=headers)
-    soup = BeautifulSoup(response.text, 'html.parser')
-    
-    guidelines = []
-    document_items = soup.select(".ecl-file") 
-    
-    for item in document_items:
-        title_tag = item.select_one(".ecl-file__title")
-        title = title_tag.text.strip() if title_tag else "N/A"
-        link_tag = item.select_one("a")
-        link = link_tag['href'] if link_tag else ""
+    try:
+        response = requests.get(url, headers=HEADERS, timeout=15)
+        print(f"EMA Response Status: {response.status_code}")
         
-        guidelines.append({
-            "agency": "EMA",
-            "title": title,
-            "url": link,
-            "status": "Final",
-            "published_date": "N/A", 
-            "category": "biosimilar" # 고정 카테고리 지정
-        })
+        guidelines = []
+        if response.status_code == 200:
+            soup = BeautifulSoup(response.text, 'html.parser')
+            document_items = soup.select(".ecl-file") 
+            print(f" -> Found {len(document_items)} documents from EMA")
+            
+            for item in document_items:
+                title_tag = item.select_one(".ecl-file__title")
+                title = title_tag.text.strip() if title_tag else "N/A"
+                link_tag = item.select_one("a")
+                link = link_tag['href'] if link_tag else ""
+                
+                guidelines.append({
+                    "agency": "EMA",
+                    "title": title,
+                    "url": link,
+                    "status": "Final",
+                    "published_date": "N/A", 
+                    "category": "biosimilar"
+                })
+        else:
+            print(f" -> Failed to fetch EMA page. Status code: {response.status_code}")
+    except Exception as e:
+         print(f" -> Error during EMA scraping: {e}")
+         
     return guidelines
 
 def save_to_supabase(guidelines):
-    """
-    수집된 가이드라인 데이터를 Supabase DB에 저장 (URL 기준 중복 방지)
-    """
+    print(f"\n--- Saving {len(guidelines)} items to Supabase ---")
     if not guidelines:
+        print("No guidelines to save. Skipping Supabase insert.")
         return
         
+    success_count = 0
     for doc in guidelines:
-        response = supabase.table("guidelines").upsert(
-            doc, on_conflict="url"
-        ).execute()
-        
-    print(f"Total {len(guidelines)} documents processed into Supabase.")
+        try:
+            supabase.table("guidelines").upsert(doc, on_conflict="url").execute()
+            success_count += 1
+        except Exception as e:
+             print(f"Supabase Insert Error on URL '{doc['url']}': {e}")
+             
+    print(f"Successfully processed {success_count} documents into Supabase.")
 
 if __name__ == "__main__":
     fda_docs = fetch_fda_guidelines()
