@@ -14,7 +14,7 @@ except Exception as e:
     print(f"Supabase Client Error: {e}")
     exit(1)
 
-# Cloudscraper 초기화 (일반 크롬 브라우저처럼 위장하여 보안 시스템 우회)
+# Cloudscraper 초기화 (일반 브라우저처럼 위장하여 보안 우회)
 scraper = cloudscraper.create_scraper(
     browser={
         'browser': 'chrome',
@@ -68,8 +68,8 @@ def fetch_fda_guidelines():
 
 def fetch_ema_biosimilar_guidelines():
     print("\n--- Starting EMA Scraping ---")
-    # EMA 바이오시밀러 가이드라인 URL
-   url = "https://www.ema.europa.eu/en/human-regulatory-overview/research-development/scientific-guidelines/multidisciplinary-guidelines/multidisciplinary-guidelines-biosimilar"
+    # 변경된 EMA 바이오시밀러 가이드라인 URL
+    url = "https://www.ema.europa.eu/en/human-regulatory-overview/research-development/scientific-guidelines/multidisciplinary-guidelines/multidisciplinary-guidelines-biosimilar"
     
     try:
         response = scraper.get(url, timeout=20)
