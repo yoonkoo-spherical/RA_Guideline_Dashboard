@@ -69,7 +69,7 @@ def fetch_fda_guidelines():
 def fetch_ema_biosimilar_guidelines():
     print("\n--- Starting EMA Scraping ---")
     # EMA 바이오시밀러 가이드라인 URL
-    url = "https://www.ema.europa.eu/en/human-regulatory-overview/research-development/scientific-guidelines/multidisciplinary/multidisciplinary-biosimilar"
+   url = "https://www.ema.europa.eu/en/human-regulatory-overview/research-development/scientific-guidelines/multidisciplinary-guidelines/multidisciplinary-guidelines-biosimilar"
     
     try:
         response = scraper.get(url, timeout=20)
