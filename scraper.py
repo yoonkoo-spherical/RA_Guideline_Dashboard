@@ -64,15 +64,15 @@ def fetch_fda_guidelines():
                             })
                             count += 1
                     print(f" -> Found {count} rows for keyword '{keyword}'")
-                    break  # 성공 시 재시도 루프 탈출
+                    break
                 
                 elif response.status_code >= 500:
                     print(f" -> Server Error {response.status_code}. Retrying in 5 seconds...")
-                    time.sleep(5)  # 5초 대기 후 재시도
+                    time.sleep(5)
                 
                 else:
                     print(f" -> Failed. Status code: {response.status_code}")
-                    break  # 400번대 에러는 재시도하지 않고 탈출
+                    break
                     
             except Exception as e:
                 print(f" -> Network/Timeout Error: {e}. Retrying in 5 seconds...")
@@ -101,14 +101,24 @@ def fetch_ema_biosimilar_guidelines():
                 soup = BeautifulSoup(response.text, 'html.parser')
                 
                 for a_tag in soup.find_all("a", href=True):
-                    href = a_tag['href']
+                    href = a_tag.get('href', '')
                     title = a_tag.text.strip()
                     
-                    if not title:
+                    if not title or not href:
+                        continue
+                        
+                    # 1. 페이지 내 앵커 이동 링크 제외
+                    if "#" in href:
+                        continue
+                    
+                    # 2. 상위 카테고리(빵판 부스러기) 메뉴 링크 제외
+                    if href.endswith("multidisciplinary-guidelines") or href.endswith("scientific-guidelines"):
                         continue
                         
                     href_lower = href.lower()
+                    # 3. 문서 다운로드 또는 상세 페이지를 의미하는 키워드가 포함된 링크만 추출
                     if "guideline" in href_lower or "reflection-paper" in href_lower or "position-statement" in href_lower or href_lower.endswith(".pdf"):
+                        # 자기 자신(현재 페이지 목록)으로의 링크 제외
                         if href == target_url or href == target_url.replace("https://www.ema.europa.eu", ""):
                             continue
 
@@ -150,16 +160,4 @@ def save_to_supabase(guidelines):
     success_count = 0
     for doc in guidelines:
         try:
-            supabase.table("guidelines").upsert(doc, on_conflict="url").execute()
-            success_count += 1
-        except Exception as e:
-             print(f"Supabase Insert Error on URL '{doc['url']}': {e}")
-             
-    print(f"Successfully processed {success_count} documents into Supabase.")
-
-if __name__ == "__main__":
-    fda_docs = fetch_fda_guidelines()
-    ema_docs = fetch_ema_biosimilar_guidelines()
-    
-    all_docs = fda_docs + ema_docs
-    save_to_supabase(all_docs)
+            supabase.table("guidelines").upsert(doc, on_conflict="url").execute
