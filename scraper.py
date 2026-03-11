@@ -1,12 +1,13 @@
 import os
+import requests
 from bs4 import BeautifulSoup
-from playwright.sync_api import sync_playwright
 from supabase import create_client, Client
 from dotenv import load_dotenv
 
 load_dotenv()
 SUPABASE_URL = os.getenv("SUPABASE_URL")
 SUPABASE_KEY = os.getenv("SUPABASE_KEY")
+SCRAPER_API_KEY = os.getenv("SCRAPER_API_KEY")
 
 try:
     supabase: Client = create_client(SUPABASE_URL, SUPABASE_KEY)
@@ -14,90 +15,105 @@ except Exception as e:
     print(f"Supabase Client Error: {e}")
     exit(1)
 
-def fetch_fda_guidelines(page):
+def fetch_fda_guidelines():
     keywords = ["biosimilar", "monoclonal antibody"] 
     guidelines = []
-    print("--- Starting FDA Scraping ---")
+    print("--- Starting FDA Scraping via ScraperAPI ---")
     
     for keyword in keywords:
-        url = f"https://www.fda.gov/regulatory-information/search-fda-guidance-documents?keys={keyword}"
+        target_url = f"https://www.fda.gov/regulatory-information/search-fda-guidance-documents?keys={keyword}"
+        
+        # ScraperAPI 파라미터 구성
+        payload = {
+            'api_key': SCRAPER_API_KEY,
+            'url': target_url,
+            'render': 'true' # JS 동적 렌더링 활성화
+        }
+        
         try:
-            # 타임아웃 30초로 증가
-            page.goto(url, wait_until="networkidle", timeout=30000)
-            print(f" -> [DEBUG] FDA '{keyword}' Page Title: {page.title()}")
+            # 타임아웃을 60초로 설정 (프록시 렌더링 소요 시간 감안)
+            response = requests.get('https://api.scraperapi.com/', params=payload, timeout=60)
+            print(f"FDA ({keyword}) Response Status: {response.status_code}")
             
-            # 테이블 대기 시간 30초로 증가
-            page.wait_for_selector("table tbody tr", timeout=30000)
-            
-            html = page.content()
-            soup = BeautifulSoup(html, 'html.parser')
-            table_rows = soup.select("table tbody tr")
-            
-            count = 0
-            for row in table_rows:
-                cols = row.find_all("td")
-                if len(cols) >= 4:
-                    title_tag = cols[0].find("a")
-                    if not title_tag:
-                        continue
-                    
-                    title = title_tag.text.strip()
-                    href = title_tag.get('href', '')
-                    link = "https://www.fda.gov" + href if href.startswith("/") else href
-                    status = cols[1].text.strip()
-                    date = cols[3].text.strip()
-                    
-                    guidelines.append({
-                        "agency": "FDA",
-                        "title": title,
-                        "url": link,
-                        "status": status,
-                        "published_date": date,
-                        "category": keyword
-                    })
-                    count += 1
-            print(f" -> Found {count} rows for keyword '{keyword}'")
+            if response.status_code == 200:
+                soup = BeautifulSoup(response.text, 'html.parser')
+                table_rows = soup.select("table tbody tr")
+                
+                count = 0
+                for row in table_rows:
+                    cols = row.find_all("td")
+                    if len(cols) >= 4:
+                        title_tag = cols[0].find("a")
+                        if not title_tag:
+                            continue
+                        
+                        title = title_tag.text.strip()
+                        href = title_tag.get('href', '')
+                        link = "https://www.fda.gov" + href if href.startswith("/") else href
+                        status = cols[1].text.strip()
+                        date = cols[3].text.strip()
+                        
+                        guidelines.append({
+                            "agency": "FDA",
+                            "title": title,
+                            "url": link,
+                            "status": status,
+                            "published_date": date,
+                            "category": keyword
+                        })
+                        count += 1
+                print(f" -> Found {count} rows for keyword '{keyword}'")
+            else:
+                print(f" -> Failed. Status code: {response.status_code}")
         except Exception as e:
             print(f" -> Error during FDA scraping for '{keyword}': {e}")
             
     return guidelines
 
-def fetch_ema_biosimilar_guidelines(page):
-    print("\n--- Starting EMA Scraping ---")
-    url = "https://www.ema.europa.eu/en/human-regulatory-overview/research-development/scientific-guidelines/multidisciplinary-guidelines/multidisciplinary-guidelines-biosimilar"
+def fetch_ema_biosimilar_guidelines():
+    print("\n--- Starting EMA Scraping via ScraperAPI ---")
+    target_url = "https://www.ema.europa.eu/en/human-regulatory-overview/research-development/scientific-guidelines/multidisciplinary-guidelines/multidisciplinary-guidelines-biosimilar"
+    
+    payload = {
+        'api_key': SCRAPER_API_KEY,
+        'url': target_url
+        # EMA는 정적 링크 구조이므로 render='true' 생략 가능
+    }
     
     guidelines = []
     try:
-        page.goto(url, wait_until="networkidle", timeout=30000)
-        html = page.content()
-        soup = BeautifulSoup(html, 'html.parser')
+        response = requests.get('https://api.scraperapi.com/', params=payload, timeout=60)
+        print(f"EMA Response Status: {response.status_code}")
         
-        for a_tag in soup.find_all("a", href=True):
-            href = a_tag['href']
-            title = a_tag.text.strip()
+        if response.status_code == 200:
+            soup = BeautifulSoup(response.text, 'html.parser')
             
-            if not title:
-                continue
+            for a_tag in soup.find_all("a", href=True):
+                href = a_tag['href']
+                title = a_tag.text.strip()
                 
-            href_lower = href.lower()
-            if "guideline" in href_lower or "reflection-paper" in href_lower or "position-statement" in href_lower or href_lower.endswith(".pdf"):
-                if href == url or href == url.replace("https://www.ema.europa.eu", ""):
+                if not title:
                     continue
+                    
+                href_lower = href.lower()
+                if "guideline" in href_lower or "reflection-paper" in href_lower or "position-statement" in href_lower or href_lower.endswith(".pdf"):
+                    if href == target_url or href == target_url.replace("https://www.ema.europa.eu", ""):
+                        continue
 
-                full_url = href if href.startswith("http") else "https://www.ema.europa.eu" + href
-                
-                guidelines.append({
-                    "agency": "EMA",
-                    "title": title,
-                    "url": full_url,
-                    "status": "Final",
-                    "published_date": "N/A", 
-                    "category": "biosimilar"
-                })
-        
-        unique_guidelines = {doc['url']: doc for doc in guidelines}.values()
-        guidelines = list(unique_guidelines)
-        print(f" -> Found {len(guidelines)} unique documents from EMA")
+                    full_url = href if href.startswith("http") else "https://www.ema.europa.eu" + href
+                    
+                    guidelines.append({
+                        "agency": "EMA",
+                        "title": title,
+                        "url": full_url,
+                        "status": "Final",
+                        "published_date": "N/A", 
+                        "category": "biosimilar"
+                    })
+            
+            unique_guidelines = {doc['url']: doc for doc in guidelines}.values()
+            guidelines = list(unique_guidelines)
+            print(f" -> Found {len(guidelines)} unique documents from EMA")
 
     except Exception as e:
          print(f" -> Error during EMA scraping: {e}")
@@ -121,20 +137,8 @@ def save_to_supabase(guidelines):
     print(f"Successfully processed {success_count} documents into Supabase.")
 
 if __name__ == "__main__":
-    with sync_playwright() as p:
-        # 봇 탐지 우회를 위한 브라우저 실행 인자 추가
-        browser = p.chromium.launch(headless=True, args=["--disable-blink-features=AutomationControlled"])
-        
-        # 일반 크롬 브라우저와 동일한 User-Agent 설정
-        context = browser.new_context(
-            user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
-        )
-        page = context.new_page()
-        
-        fda_docs = fetch_fda_guidelines(page)
-        ema_docs = fetch_ema_biosimilar_guidelines(page)
-        
-        browser.close()
-        
-        all_docs = fda_docs + ema_docs
-        save_to_supabase(all_docs)
+    fda_docs = fetch_fda_guidelines()
+    ema_docs = fetch_ema_biosimilar_guidelines()
+    
+    all_docs = fda_docs + ema_docs
+    save_to_supabase(all_docs)
