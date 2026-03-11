@@ -48,11 +48,25 @@ def main():
     if search_query:
         filtered_df = filtered_df[filtered_df['title'].str.contains(search_query, case=False, na=False)]
     
+    # --- 추가된 정렬 로직 ---
+    # ai_summary가 존재하고, 에러 메시지가 아닌 경우를 True로 판별
+    def has_valid_summary(text):
+        if pd.isna(text) or str(text).strip() == "":
+            return False
+        if "PDF 텍스트 추출 불가" in str(text):
+            return False
+        return True
+        
+    filtered_df['has_summary'] = filtered_df['ai_summary'].apply(has_valid_summary)
+    
+    # 요약문 있는 문서(True)가 먼저 오도록 내림차순 정렬, 그 다음 제목순 정렬
+    filtered_df = filtered_df.sort_values(by=['has_summary', 'title'], ascending=[False, True])
+    # -----------------------
+
     st.subheader(f"검색 결과: {len(filtered_df)} 건")
     
-    # 펼침/숨김 패널(Expander)을 사용한 리스트 렌더링
     for index, row in filtered_df.iterrows():
-        with st.expander(f"📄 {row['title']} ({row['agency']})"):
+        with st.expander(f"{'✅' if row['has_summary'] else '⏳'} {row['title']} ({row['agency']})"):
             col1, col2 = st.columns([3, 1])
             
             with col1:
@@ -62,8 +76,7 @@ def main():
             st.divider()
             st.markdown("#### 💡 AI 핵심 요약")
             
-            # ai_summary 데이터가 존재하는 경우 출력
-            if pd.notna(row.get('ai_summary')) and str(row.get('ai_summary')).strip() != "":
+            if row['has_summary']:
                 st.write(row['ai_summary'])
             else:
                 st.info("현재 AI 요약이 대기 중이거나 원문 텍스트 추출이 불가능한 문서입니다.")
