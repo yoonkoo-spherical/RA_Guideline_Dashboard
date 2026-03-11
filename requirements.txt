@@ -4,3 +4,5 @@ supabase
 python-dotenv
 streamlit
 pandas
+PyMuPDF
+google-generativeai
