@@ -35,7 +35,4 @@ def fetch_fda_guidelines():
                 print(f"FDA ({keyword}) - Attempt {attempt + 1}/{max_retries}")
                 response = requests.get('https://api.scraperapi.com/', params=payload, timeout=60)
                 
-                if response.status_code == 200:
-                    print(f" -> Success (Status 200)")
-                    soup = BeautifulSoup(response.text, 'html.parser')
-                    table_rows = soup.select("table tbody tr")
+                if response.status_code ==
