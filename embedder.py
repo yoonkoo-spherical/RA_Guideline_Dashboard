@@ -43,44 +43,37 @@ def extract_text(url):
         return None
 
 def clean_and_chunk_text(text, chunk_size=1000, overlap=100):
-    # 1. 텍스트 정제: 연속된 공백 및 줄바꿈을 하나의 공백으로 치환하여 토큰 절약
     text = re.sub(r'\s+', ' ', text).strip()
-    
-    # 2. 청크 분할
     chunks = []
     for i in range(0, len(text), chunk_size - overlap):
         chunk = text[i:i + chunk_size]
-        if len(chunk) > 100:  # 너무 짧은 꼬리 부분 제외
+        if len(chunk) > 100:
             chunks.append(chunk)
     return chunks
 
 def process_embeddings():
     print("--- Starting Document Embedding ---")
     
-    # 전체 가이드라인 목록 조회
     all_docs = supabase.table("guidelines").select("url, title").execute().data
     
-    # 이미 임베딩된 문서의 URL 목록 조회
     embedded_urls_response = supabase.table("document_chunks").select("url").execute().data
     embedded_urls = {item['url'] for item in embedded_urls_response}
     
-    # 임베딩되지 않은 문서 필터링
     unprocessed_docs = [doc for doc in all_docs if doc['url'] not in embedded_urls]
     
     if not unprocessed_docs:
         print("모든 문서의 임베딩이 완료되었습니다.")
         return
 
-    # API 제한을 고려하여 1회 실행 시 1개의 문서만 처리
     target_doc = unprocessed_docs[0]
     print(f"Processing: {target_doc['title']}")
     
     text = extract_text(target_doc['url'])
     if not text:
         print(" -> 텍스트 추출 실패. 임베딩을 건너뜁니다.")
-        # 실패 기록을 남겨 무한 루프 방지 (더미 데이터 삽입)
+        # 실패 시 3072 크기의 0 벡터 삽입
         supabase.table("document_chunks").insert({
-            "url": target_doc["url"], "chunk_index": -1, "content": "EXTRACTION_FAILED", "embedding": [0]*768
+            "url": target_doc["url"], "chunk_index": -1, "content": "EXTRACTION_FAILED", "embedding": [0]*3072
         }).execute()
         return
 
@@ -89,14 +82,13 @@ def process_embeddings():
 
     for i, chunk in enumerate(chunks):
         try:
-            # 텍스트 임베딩 전용 모델 호출
+            # 최신 공식 임베딩 모델 적용
             response = client.models.embed_content(
-                model='text-embedding-004',
+                model='gemini-embedding-001',
                 contents=chunk
             )
             embedding_vector = response.embeddings[0].values
             
-            # DB 삽입
             supabase.table("document_chunks").insert({
                 "url": target_doc["url"],
                 "chunk_index": i,
@@ -105,7 +97,7 @@ def process_embeddings():
             }).execute()
             
             print(f"   - Chunk {i+1}/{len(chunks)} 저장 완료")
-            time.sleep(2) # 분당 API 호출 제한(RPM) 방지를 위한 대기 시간
+            time.sleep(2) 
             
         except Exception as e:
             print(f"   - Chunk {i+1} 임베딩 실패: {e}")
