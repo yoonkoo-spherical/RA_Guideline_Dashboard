@@ -2,6 +2,8 @@ import os
 import time
 import requests
 import fitz  # PyMuPDF
+from bs4 import BeautifulSoup
+from urllib.parse import urljoin
 from google import genai
 from supabase import create_client, Client
 from dotenv import load_dotenv
@@ -13,23 +15,42 @@ SUPABASE_KEY = os.getenv("SUPABASE_KEY")
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
 
 supabase: Client = create_client(SUPABASE_URL, SUPABASE_KEY)
-
-# 최신 SDK 클라이언트 초기화
 client = genai.Client(api_key=GEMINI_API_KEY)
 
 def extract_text_from_url(url):
     try:
-        response = requests.get(url, timeout=30)
+        # 방화벽 차단 방지를 위한 기본 브라우저 헤더 추가
+        headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)"}
+        response = requests.get(url, headers=headers, timeout=30)
+        
         if response.status_code != 200:
             return None
         
-        if url.lower().endswith(".pdf") or b"%PDF" in response.content[:5]:
+        # 1. URL 자체가 PDF인 경우
+        if b"%PDF" in response.content[:5]:
             doc = fitz.open(stream=response.content, filetype="pdf")
-            text = ""
-            for page in doc:
-                text += page.get_text()
+            text = "".join(page.get_text() for page in doc)
             return text
         
+        # 2. URL이 웹페이지(HTML)인 경우 내부에서 PDF 다운로드 링크 탐색
+        soup = BeautifulSoup(response.text, 'html.parser')
+        pdf_link = None
+        
+        for a_tag in soup.find_all("a", href=True):
+            if a_tag['href'].lower().endswith(".pdf"):
+                pdf_link = a_tag['href']
+                break
+                
+        if pdf_link:
+            # 상대 경로(예: /documents/...)를 절대 경로(https://...)로 변환
+            full_pdf_url = urljoin(url, pdf_link)
+            
+            pdf_response = requests.get(full_pdf_url, headers=headers, timeout=30)
+            if pdf_response.status_code == 200 and b"%PDF" in pdf_response.content[:5]:
+                doc = fitz.open(stream=pdf_response.content, filetype="pdf")
+                text = "".join(page.get_text() for page in doc)
+                return text
+
         return None
     except Exception as e:
         print(f"Text extraction failed for {url}: {e}")
@@ -50,7 +71,6 @@ def generate_summary(text):
     """
     
     try:
-        # 최신 google-genai 모델 호출 문법
         response = client.models.generate_content(
             model='gemini-2.5-flash-lite',
             contents=prompt
@@ -80,7 +100,7 @@ def process_unsummarized_docs():
             supabase.table("guidelines").update({"ai_summary": summary}).eq("url", doc["url"]).execute()
             print(" -> 요약 완료 및 DB 업데이트 성공")
         else:
-            print(" -> 텍스트 추출 실패 (PDF가 아니거나 접근 불가)")
+            print(" -> 텍스트 추출 실패 (PDF 링크를 찾을 수 없거나 접근 불가)")
             supabase.table("guidelines").update({"ai_summary": "PDF 텍스트 추출 불가"}).eq("url", doc["url"]).execute()
             
         time.sleep(10)
