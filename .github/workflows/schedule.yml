@@ -2,6 +2,7 @@ name: Daily Guideline Scraper
 
 on:
   schedule:
+    # KST 기준 매일 05:00 실행 (UTC 기준 20:00)
     - cron: '0 20 * * *'
   workflow_dispatch:
 
@@ -11,10 +12,10 @@ jobs:
 
     steps:
       - name: 저장소 코드 불러오기 (Checkout repo)
-        uses: actions/checkout@v3
+        uses: actions/checkout@v4 # v3에서 v4로 업데이트 (Node.js 버전 경고 해결)
 
       - name: 파이썬 환경 설정 (Set up Python)
-        uses: actions/setup-python@v4
+        uses: actions/setup-python@v5 # v4에서 v5로 업데이트 (Node.js 버전 경고 해결)
         with:
           python-version: '3.10'
 
