@@ -3,6 +3,7 @@ import pandas as pd
 from supabase import create_client, Client
 import rag_engine
 import json
+import markdown
 
 @st.cache_resource
 def init_connection():
@@ -185,14 +186,31 @@ def main():
                     st.divider()
                     st.markdown(row['comparison_text'])
 
-    # --- TAB 5: 사용 이력 및 마크다운 다운로드 ---
+# app.py 상단에 아래 라이브러리 임포트 추가 필수
+    # import markdown
+
+    # --- TAB 5: 사용 이력 및 다운로드 ---
     with tab5:
         st.markdown("#### 🗂️ RAG 채팅 및 분석 전체 이력")
-        st.write("새로고침 후에도 유지되는 전체 기록입니다. 데이터를 마크다운(.md) 포맷으로 다운로드할 수 있습니다.")
+        st.write("새로고침 후에도 유지되는 전체 기록입니다. 데이터를 일반 웹 브라우저에서 읽기 편한 형식(.html)으로 다운로드할 수 있습니다.")
         
-        # 채팅 이력 불러오기
         chat_data = supabase.table("chat_history").select("*").order("created_at", desc=False).execute().data
         analysis_data = supabase.table("analysis_history").select("*").order("created_at", desc=True).execute().data
+
+        # 다운로드 문서용 공통 CSS 스타일
+        css_style = """
+        <style>
+            body { font-family: 'Malgun Gothic', 'Apple SD Gothic Neo', sans-serif; line-height: 1.6; color: #333; max-width: 1000px; margin: 0 auto; padding: 30px; }
+            h1, h2, h3 { color: #0052cc; border-bottom: 1px solid #eee; padding-bottom: 8px; margin-top: 30px; }
+            table { border-collapse: collapse; width: 100%; margin: 20px 0; font-size: 0.95em; }
+            th, td { border: 1px solid #ddd; padding: 12px; text-align: left; vertical-align: top; }
+            th { background-color: #f0f2f6; font-weight: bold; color: #31333F; }
+            tr:nth-child(even) { background-color: #fafafa; }
+            blockquote { border-left: 4px solid #0052cc; margin: 0; padding-left: 15px; color: #555; background-color: #f9f9f9; padding: 10px; }
+            hr { border: 0; border-top: 1px solid #eee; margin: 30px 0; }
+            .date-stamp { color: #888; font-size: 0.9em; }
+        </style>
+        """
 
         col1, col2 = st.columns(2)
         
@@ -202,14 +220,18 @@ def main():
                 md_chat = "# AI RAG 채팅 기록\n\n"
                 for chat in chat_data:
                     role_kr = "사용자" if chat['role'] == 'user' else "AI"
-                    md_chat += f"**{role_kr}** ({str(chat['created_at'])[:16]}):\n{chat['content']}\n\n---\n\n"
+                    md_chat += f"### {role_kr}\n<div class='date-stamp'>작성일시: {str(chat['created_at'])[:16]}</div>\n\n{chat['content']}\n\n---\n\n"
                 
-                st.download_button(label="채팅 기록 다운로드 (.md)", data=md_chat, file_name="rag_chat_history.md", mime="text/markdown")
+                # 마크다운을 HTML 표(tables) 확장 기능과 함께 변환
+                html_chat_content = markdown.markdown(md_chat, extensions=['tables'])
+                final_html_chat = f"<!DOCTYPE html><html><head><meta charset='utf-8'>{css_style}</head><body>{html_chat_content}</body></html>"
                 
-                with st.container(height=400):
+                st.download_button(label="채팅 기록 다운로드 (.html)", data=final_html_chat, file_name="rag_chat_history.html", mime="text/html")
+                
+                with st.container(height=500):
                     for chat in chat_data:
                         role_kr = "👤 사용자" if chat['role'] == 'user' else "🤖 AI"
-                        st.markdown(f"**{role_kr}**")
+                        st.markdown(f"**{role_kr}** ({str(chat['created_at'])[:16]})")
                         st.write(chat['content'])
                         st.divider()
             else:
@@ -218,20 +240,22 @@ def main():
         with col2:
             st.subheader("⚖️ 수동 비교 분석 기록")
             if analysis_data:
-                md_analysis = "# 다중 문서 수동 비교 분석 기록\n\n"
+                md_analysis = "# 다중 문서 수동 비교 분석 리포트\n\n"
                 for r in analysis_data:
                     md_analysis += f"## 분석 일시: {str(r['created_at'])[:16]}\n\n"
-                    # 대상 문서 목록 정리
                     try:
                         docs = json.loads(r['docs_info'])
-                        doc_titles = ", ".join([d.get('title', 'Unknown') for d in docs])
-                        md_analysis += f"**분석 대상:** {doc_titles}\n\n"
+                        doc_titles = "<br>".join([f"- {d.get('title', 'Unknown')} ({d.get('agency', 'N/A')})" for d in docs])
+                        md_analysis += f"**[분석 대상 문서]**<br>{doc_titles}\n\n"
                     except: pass
-                    md_analysis += f"**분석 결과:**\n{r['comparison_result']}\n\n---\n\n"
+                    md_analysis += f"{r['comparison_result']}\n\n---\n\n"
                 
-                st.download_button(label="비교 분석 기록 다운로드 (.md)", data=md_analysis, file_name="analysis_history.md", mime="text/markdown")
+                html_analysis_content = markdown.markdown(md_analysis, extensions=['tables'])
+                final_html_analysis = f"<!DOCTYPE html><html><head><meta charset='utf-8'>{css_style}</head><body>{html_analysis_content}</body></html>"
                 
-                with st.container(height=400):
+                st.download_button(label="비교 분석 기록 다운로드 (.html)", data=final_html_analysis, file_name="analysis_history.html", mime="text/html")
+                
+                with st.container(height=500):
                     for r in analysis_data:
                         with st.expander(f"분석 일시: {str(r['created_at'])[:16]}"):
                             st.markdown(r['comparison_result'])
