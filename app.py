@@ -11,7 +11,11 @@ def init_connection():
     key = st.secrets["SUPABASE_KEY"]
     return create_client(url, key)
 
-supabase: Client = init_connection()
+try:
+    supabase: Client = init_connection()
+except Exception:
+    st.error("데이터베이스 연결 설정에 문제가 발생했습니다. 관리자에게 문의하십시오.")
+    st.stop()
 
 @st.cache_data(ttl=600)
 def load_data():
@@ -36,23 +40,36 @@ def calculate_progress(df, embedded_urls):
     return total_docs, summarized_docs, summary_pct, embedded_docs, embed_pct
 
 def save_chat_to_db(role, content):
-    supabase.table("chat_history").insert({"role": role, "content": content}).execute()
+    try:
+        supabase.table("chat_history").insert({"role": role, "content": content}).execute()
+    except Exception:
+        pass # 이력 저장 실패 시 앱을 중단하지 않고 무시함
 
 def save_analysis_to_db(docs_info, result):
-    supabase.table("analysis_history").insert({"docs_info": json.dumps(docs_info, ensure_ascii=False), "comparison_result": result}).execute()
+    try:
+        supabase.table("analysis_history").insert({"docs_info": json.dumps(docs_info, ensure_ascii=False), "comparison_result": result}).execute()
+    except Exception:
+        pass
 
 def delete_analysis_record(record_id):
-    """지정된 ID의 분석 이력을 데이터베이스에서 삭제합니다."""
-    supabase.table("analysis_history").delete().eq("id", record_id).execute()
+    try:
+        supabase.table("analysis_history").delete().eq("id", record_id).execute()
+    except Exception:
+        st.error("기록 삭제 중 오류가 발생했습니다.")
 
 def main():
     st.set_page_config(page_title="RA 가이드라인 대시보드", layout="wide")
     st.title("FDA & EMA 가이드라인 통합 검색 및 분석")
     
-    df, comp_df, embedded_urls = load_data()
+    # 1. 데이터베이스 로드 예외 처리
+    try:
+        df, comp_df, embedded_urls = load_data()
+    except Exception:
+        st.error("데이터베이스에서 가이드라인 정보를 불러오는 데 실패했습니다. 네트워크 상태를 확인하거나 잠시 후 다시 시도해 주십시오.")
+        return
     
     if df.empty:
-        st.warning("데이터베이스에 데이터가 없습니다.")
+        st.warning("데이터베이스에 수집된 가이드라인 데이터가 없습니다.")
         return
 
     st.sidebar.header("📊 데이터 처리 현황")
@@ -137,15 +154,24 @@ def main():
             
             with st.chat_message("assistant"):
                 with st.spinner("답변 생성 중..."):
-                    response_text, sources = rag_engine.ask_guideline(prompt)
-                    st.markdown(response_text)
-                    if sources:
-                        with st.expander("🔍 AI가 참고한 원문 조각 확인"):
-                            for i, source in enumerate(sources):
-                                st.markdown(f"**[{i+1}] 출처:** [{source['url']}]({source['url']})")
-            
-            st.session_state.messages.append({"role": "assistant", "content": response_text, "sources": sources})
-            save_chat_to_db("assistant", response_text)
+                    # 2. AI 질의응답 예외 처리
+                    try:
+                        response_text, sources = rag_engine.ask_guideline(prompt)
+                        
+                        # rag_engine 내부에서 에러 텍스트를 반환한 경우에 대한 처리
+                        if "답변 생성 오류" in response_text or "질문 분석 실패" in response_text:
+                            st.error("AI가 답변을 생성하지 못했습니다. (API 할당량 초과 또는 네트워크 오류)")
+                        else:
+                            st.markdown(response_text)
+                            if sources:
+                                with st.expander("🔍 AI가 참고한 원문 조각 확인"):
+                                    for i, source in enumerate(sources):
+                                        st.markdown(f"**[{i+1}] 출처:** [{source['url']}]({source['url']})")
+                            
+                            st.session_state.messages.append({"role": "assistant", "content": response_text, "sources": sources})
+                            save_chat_to_db("assistant", response_text)
+                    except Exception:
+                        st.error("예기치 않은 시스템 오류가 발생했습니다. 잠시 후 다시 시도해 주십시오.")
 
     # --- TAB 3: 다중 문서 수동 비교 ---
     with tab3:
@@ -165,15 +191,24 @@ def main():
             
             selected_rows = edited_df[edited_df["비교 선택"]]
             if st.button("비교 분석 실행", type="primary"):
-                if len(selected_rows) < 2: st.warning("문서를 2개 이상 선택해야 합니다.")
+                if len(selected_rows) < 2: 
+                    st.warning("문서를 2개 이상 선택해야 합니다.")
                 else:
                     selected_docs_info = selected_rows.to_dict('records')
                     with st.spinner("문서 대조 중..."):
-                        comparison_result = rag_engine.compare_multiple_documents(selected_docs_info)
-                        save_analysis_to_db(selected_docs_info, comparison_result)
-                    st.divider()
-                    st.markdown("#### 📊 분석 결과")
-                    st.markdown(comparison_result)
+                        # 3. 다중 문서 비교 예외 처리
+                        try:
+                            comparison_result = rag_engine.compare_multiple_documents(selected_docs_info)
+                            
+                            if "오류" in comparison_result:
+                                st.error("문서 비교 분석 중 오류가 발생했습니다. 선택한 문서의 양이 너무 많아 API 토큰 한도를 초과했을 수 있습니다.")
+                            else:
+                                save_analysis_to_db(selected_docs_info, comparison_result)
+                                st.divider()
+                                st.markdown("#### 📊 분석 결과")
+                                st.markdown(comparison_result)
+                        except Exception:
+                            st.error("분석 서버와의 통신에 실패했습니다. 잠시 후 다시 시도해 주십시오.")
 
     # --- TAB 4: 신/구버전 자동 비교 이력 ---
     with tab4:
@@ -191,10 +226,13 @@ def main():
     with tab5:
         st.markdown("#### 🗂️ RAG 채팅 및 분석 전체 이력")
         
-        chat_data = supabase.table("chat_history").select("*").order("created_at", desc=False).execute().data
-        analysis_data = supabase.table("analysis_history").select("*").order("created_at", desc=True).execute().data
+        try:
+            chat_data = supabase.table("chat_history").select("*").order("created_at", desc=False).execute().data
+            analysis_data = supabase.table("analysis_history").select("*").order("created_at", desc=True).execute().data
+        except Exception:
+            st.error("이력 데이터를 불러오는 데 실패했습니다.")
+            chat_data, analysis_data = [], []
 
-        # HTML 다운로드용 공통 CSS
         css_style = """
         <style>
             body { font-family: 'Malgun Gothic', 'Apple SD Gothic Neo', sans-serif; line-height: 1.6; color: #333; max-width: 1000px; margin: 0 auto; padding: 30px; }
@@ -219,10 +257,12 @@ def main():
                     role_kr = "사용자" if chat['role'] == 'user' else "AI"
                     md_chat += f"### {role_kr}\n<div class='date-stamp'>작성일시: {str(chat['created_at'])[:16]}</div>\n\n{chat['content']}\n\n---\n\n"
                 
-                html_chat_content = markdown.markdown(md_chat, extensions=['tables'])
-                final_html_chat = f"<!DOCTYPE html><html><head><meta charset='utf-8'>{css_style}</head><body>{html_chat_content}</body></html>"
-                
-                st.download_button(label="전체 채팅 기록 다운로드 (.html)", data=final_html_chat, file_name="rag_chat_history.html", mime="text/html")
+                try:
+                    html_chat_content = markdown.markdown(md_chat, extensions=['tables'])
+                    final_html_chat = f"<!DOCTYPE html><html><head><meta charset='utf-8'>{css_style}</head><body>{html_chat_content}</body></html>"
+                    st.download_button(label="전체 채팅 기록 다운로드 (.html)", data=final_html_chat, file_name="rag_chat_history.html", mime="text/html")
+                except Exception:
+                    st.warning("파일 다운로드 준비 중 오류가 발생했습니다.")
                 
                 with st.container(height=600):
                     for chat in chat_data:
@@ -237,7 +277,6 @@ def main():
             st.subheader("⚖️ 수동 비교 분석 기록")
             if analysis_data:
                 for r in analysis_data:
-                    # 파일명 생성 로직
                     doc_titles_list = []
                     file_title_prefix = "다중문서비교"
                     try:
@@ -252,17 +291,18 @@ def main():
                     safe_time = raw_time.replace(":", "").replace("-", "").replace(" ", "_")
                     file_name = f"{file_title_prefix}_{safe_time}.html"
 
-                    # 개별 다운로드용 HTML 구성
                     md_analysis = f"# 다중 문서 수동 비교 분석 리포트\n\n"
                     md_analysis += f"<div class='date-stamp'>분석 일시: {raw_time}</div>\n\n"
                     if doc_titles_list:
                         md_analysis += f"**[분석 대상 문서]**<br>" + "<br>".join(doc_titles_list) + "\n\n<hr>\n\n"
                     md_analysis += f"{r['comparison_result']}"
                     
-                    html_analysis_content = markdown.markdown(md_analysis, extensions=['tables'])
-                    final_html_analysis = f"<!DOCTYPE html><html><head><meta charset='utf-8'>{css_style}</head><body>{html_analysis_content}</body></html>"
-                    
-                    # UI 렌더링 (다운로드 버튼 및 삭제 버튼 분리)
+                    try:
+                        html_analysis_content = markdown.markdown(md_analysis, extensions=['tables'])
+                        final_html_analysis = f"<!DOCTYPE html><html><head><meta charset='utf-8'>{css_style}</head><body>{html_analysis_content}</body></html>"
+                    except Exception:
+                        final_html_analysis = "HTML 변환 오류 발생"
+
                     with st.expander(f"분석 일시: {raw_time} | {file_title_prefix}"):
                         btn_col1, btn_col2 = st.columns([1, 1])
                         with btn_col1:
