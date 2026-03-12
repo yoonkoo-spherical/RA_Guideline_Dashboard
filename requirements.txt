@@ -6,3 +6,4 @@ streamlit
 pandas
 PyMuPDF
 google-genai
+markdown
