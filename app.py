@@ -57,6 +57,19 @@ def delete_analysis_record(record_id):
     except Exception:
         st.error("기록 삭제 중 오류가 발생했습니다.")
 
+# 시간 변환 도우미 함수 (UTC -> KST 변환 및 'T' 제거)
+def convert_to_kst(time_str):
+    if pd.isna(time_str) or str(time_str).strip() == "" or str(time_str).lower() == 'nan':
+        return "정보 없음"
+    try:
+        dt = pd.to_datetime(time_str)
+        if dt.tzinfo is None:
+            dt = dt.tz_localize('UTC')
+        kst_dt = dt.tz_convert('Asia/Seoul')
+        return kst_dt.strftime('%Y-%m-%d %H:%M')
+    except Exception:
+        return str(time_str).replace("T", " ")[:16]
+
 def main():
     st.set_page_config(page_title="RA 가이드라인 대시보드", layout="wide")
     st.title("FDA & EMA 가이드라인 통합 검색 및 분석")
@@ -124,11 +137,7 @@ def main():
             with st.expander(f"{status_icon} {row['title']} ({row['agency']})"):
                 col1, col2 = st.columns([3, 1])
                 with col1:
-                    # DB 추가일 추출 및 슬라이싱 처리 (YYYY-MM-DD HH:MM)
-                    db_added_date = str(row.get('created_at', '정보 없음'))[:16]
-                    if db_added_date.lower() == 'nan':
-                        db_added_date = '정보 없음'
-                        
+                    db_added_date = convert_to_kst(row.get('created_at'))
                     st.write(f"**기관:** {row['agency']} | **식별자:** {row.get('ref_number', 'N/A')} | **분류:** {row['category']} | **DB 추가일:** {db_added_date}")
                     st.markdown(f"[🔗 원본 문서 열기]({row['url']})")
                 st.divider()
@@ -216,7 +225,8 @@ def main():
             st.info("현재 문서 간의 버전 업데이트(개정) 이력이 감지되지 않았습니다.")
         else:
             for index, row in comp_df.iterrows():
-                with st.expander(f"업데이트 식별자: {row['ref_number']} | 감지일: {str(row['created_at'])[:10]}"):
+                db_added_date = convert_to_kst(row.get('created_at'))
+                with st.expander(f"업데이트 식별자: {row['ref_number']} | 감지일: {db_added_date}"):
                     st.markdown(f"**[구버전 원문]({row['old_url']}) ➡️ [신버전 원문]({row['new_url']})**")
                     st.divider()
                     st.markdown(row['comparison_text'])
@@ -254,7 +264,8 @@ def main():
                 md_chat = "# AI RAG 채팅 기록\n\n"
                 for chat in chat_data:
                     role_kr = "사용자" if chat['role'] == 'user' else "AI"
-                    md_chat += f"### {role_kr}\n<div class='date-stamp'>작성일시: {str(chat['created_at'])[:16]}</div>\n\n{chat['content']}\n\n---\n\n"
+                    chat_time_kst = convert_to_kst(chat.get('created_at'))
+                    md_chat += f"### {role_kr}\n<div class='date-stamp'>작성일시: {chat_time_kst}</div>\n\n{chat['content']}\n\n---\n\n"
                 
                 try:
                     html_chat_content = markdown.markdown(md_chat, extensions=['tables'])
@@ -266,7 +277,8 @@ def main():
                 with st.container(height=600):
                     for chat in chat_data:
                         role_kr = "👤 사용자" if chat['role'] == 'user' else "🤖 AI"
-                        st.markdown(f"**{role_kr}** ({str(chat['created_at'])[:16]})")
+                        chat_time_kst = convert_to_kst(chat.get('created_at'))
+                        st.markdown(f"**{role_kr}** ({chat_time_kst})")
                         st.write(chat['content'])
                         st.divider()
             else:
@@ -286,7 +298,7 @@ def main():
                     except:
                         pass
                     
-                    raw_time = str(r['created_at'])[:16]
+                    raw_time = convert_to_kst(r.get('created_at'))
                     safe_time = raw_time.replace(":", "").replace("-", "").replace(" ", "_")
                     file_name = f"{file_title_prefix}_{safe_time}.html"
 
