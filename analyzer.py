@@ -97,7 +97,7 @@ def compare_documents(old_text, new_text):
     """
     try:
         response = client.models.generate_content(
-            model='gemini-2.5-pro', # 복잡한 비교 분석에는 상위 모델 적용
+            model='gemini-2.5-flash', # 복잡한 비교 분석에는 상위 모델 적용
             contents=prompt
         )
         return response.text
