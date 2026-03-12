@@ -52,10 +52,9 @@ def clean_and_chunk_text(text, chunk_size=1000, overlap=100):
     return chunks
 
 def process_embeddings():
-    print("--- Starting Document Embedding ---")
+    print("--- Starting Document Embedding (Batch Mode) ---")
     
     all_docs = supabase.table("guidelines").select("url, title").execute().data
-    
     embedded_urls_response = supabase.table("document_chunks").select("url").execute().data
     embedded_urls = {item['url'] for item in embedded_urls_response}
     
@@ -65,44 +64,43 @@ def process_embeddings():
         print("모든 문서의 임베딩이 완료되었습니다.")
         return
 
-    target_doc = unprocessed_docs[0]
-    print(f"Processing: {target_doc['title']}")
-    
-    text = extract_text(target_doc['url'])
-    if not text:
-        print(" -> 텍스트 추출 실패. 임베딩을 건너뜁니다.")
-        # 실패 시 3072 크기의 0 벡터 삽입
-        supabase.table("document_chunks").insert({
-            "url": target_doc["url"], "chunk_index": -1, "content": "EXTRACTION_FAILED", "embedding": [0]*3072
-        }).execute()
-        return
-
-    chunks = clean_and_chunk_text(text)
-    print(f" -> {len(chunks)} 개의 청크로 분할 완료. 임베딩 시작...")
-
-    for i, chunk in enumerate(chunks):
-        try:
-            # 최신 공식 임베딩 모델 적용
-            response = client.models.embed_content(
-                model='gemini-embedding-001',
-                contents=chunk
-            )
-            embedding_vector = response.embeddings[0].values
-            
+    # 최대 3개 문서 처리
+    for target_doc in unprocessed_docs[:3]:
+        print(f"\nProcessing: {target_doc['title']}")
+        
+        text = extract_text(target_doc['url'])
+        if not text:
             supabase.table("document_chunks").insert({
-                "url": target_doc["url"],
-                "chunk_index": i,
-                "content": chunk,
-                "embedding": embedding_vector
+                "url": target_doc["url"], "chunk_index": -1, "content": "FAILED", "embedding": [0]*3072
             }).execute()
-            
-            print(f"   - Chunk {i+1}/{len(chunks)} 저장 완료")
-            time.sleep(2) 
-            
-        except Exception as e:
-            print(f"   - Chunk {i+1} 임베딩 실패: {e}")
+            continue
 
-    print(" -> 문서 임베딩 및 DB 적재 완료")
+        chunks = clean_and_chunk_text(text)
+        print(f" -> {len(chunks)} 개의 청크로 분할 완료. 임베딩 시작...")
+
+        for i, chunk in enumerate(chunks):
+            try:
+                response = client.models.embed_content(
+                    model='gemini-embedding-001',
+                    contents=chunk
+                )
+                embedding_vector = response.embeddings[0].values
+                
+                supabase.table("document_chunks").insert({
+                    "url": target_doc["url"],
+                    "chunk_index": i,
+                    "content": chunk,
+                    "embedding": embedding_vector
+                }).execute()
+                
+                print(f"   - Chunk {i+1}/{len(chunks)} 저장 완료")
+                time.sleep(5)  # API Rate Limit 보호를 위한 5초 대기
+                
+            except Exception as e:
+                print(f"   - Chunk {i+1} 임베딩 실패: {e}")
+                time.sleep(10)
+
+    print("\n -> 배치 임베딩 작업 종료")
 
 if __name__ == "__main__":
     process_embeddings()
