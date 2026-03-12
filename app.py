@@ -43,7 +43,7 @@ def save_chat_to_db(role, content):
     try:
         supabase.table("chat_history").insert({"role": role, "content": content}).execute()
     except Exception:
-        pass # 이력 저장 실패 시 앱을 중단하지 않고 무시함
+        pass
 
 def save_analysis_to_db(docs_info, result):
     try:
@@ -61,7 +61,6 @@ def main():
     st.set_page_config(page_title="RA 가이드라인 대시보드", layout="wide")
     st.title("FDA & EMA 가이드라인 통합 검색 및 분석")
     
-    # 1. 데이터베이스 로드 예외 처리
     try:
         df, comp_df, embedded_urls = load_data()
     except Exception:
@@ -125,7 +124,12 @@ def main():
             with st.expander(f"{status_icon} {row['title']} ({row['agency']})"):
                 col1, col2 = st.columns([3, 1])
                 with col1:
-                    st.write(f"**기관:** {row['agency']} | **식별자:** {row.get('ref_number', 'N/A')} | **분류:** {row['category']}")
+                    # DB 추가일 추출 및 슬라이싱 처리 (YYYY-MM-DD HH:MM)
+                    db_added_date = str(row.get('created_at', '정보 없음'))[:16]
+                    if db_added_date.lower() == 'nan':
+                        db_added_date = '정보 없음'
+                        
+                    st.write(f"**기관:** {row['agency']} | **식별자:** {row.get('ref_number', 'N/A')} | **분류:** {row['category']} | **DB 추가일:** {db_added_date}")
                     st.markdown(f"[🔗 원본 문서 열기]({row['url']})")
                 st.divider()
                 st.markdown("#### 💡 AI 핵심 요약")
@@ -154,11 +158,8 @@ def main():
             
             with st.chat_message("assistant"):
                 with st.spinner("답변 생성 중..."):
-                    # 2. AI 질의응답 예외 처리
                     try:
                         response_text, sources = rag_engine.ask_guideline(prompt)
-                        
-                        # rag_engine 내부에서 에러 텍스트를 반환한 경우에 대한 처리
                         if "답변 생성 오류" in response_text or "질문 분석 실패" in response_text:
                             st.error("AI가 답변을 생성하지 못했습니다. (API 할당량 초과 또는 네트워크 오류)")
                         else:
@@ -196,10 +197,8 @@ def main():
                 else:
                     selected_docs_info = selected_rows.to_dict('records')
                     with st.spinner("문서 대조 중..."):
-                        # 3. 다중 문서 비교 예외 처리
                         try:
                             comparison_result = rag_engine.compare_multiple_documents(selected_docs_info)
-                            
                             if "오류" in comparison_result:
                                 st.error("문서 비교 분석 중 오류가 발생했습니다. 선택한 문서의 양이 너무 많아 API 토큰 한도를 초과했을 수 있습니다.")
                             else:
