@@ -19,7 +19,7 @@ client = genai.Client(api_key=GEMINI_API_KEY)
 
 # 지능형 라우팅: 의도 파악은 가벼운 모델, 실제 전문가 답변 생성은 상위 모델(1.5 Pro) 사용
 ROUTING_MODEL = 'gemini-2.5-flash-lite' 
-GENERATION_MODEL = 'gemini-1.5-pro' 
+GENERATION_MODEL = 'gemini-2.5-pro' 
 EMBEDDING_MODEL = 'gemini-embedding-001'
 
 def get_query_embedding(query_text):
