@@ -45,22 +45,21 @@ def analyze_document(text):
     if not text or len(text) < 100:
         return {"ref_number": "N/A", "summary": "텍스트 추출 실패"}
     
-    # Step 8: 식별자 추출 프롬프트 고도화
+    # 8년차 RA 전문가 수준의 데이터 추출 프롬프트
     prompt = f"""
-    당신은 RA 전문가입니다. 가이드라인 원문을 읽고 두 항목을 추출하십시오.
+    당신은 8년 이상 경력의 글로벌 바이오시밀러 RA(Regulatory Affairs) 전문가입니다.
+    원문을 분석하여 다음 두 항목을 추출하십시오.
     
-    1. ref_number: 고유 식별자. 
-       - FDA 문서인 경우 'Docket Number' (예: FDA-2019-D-5390)를 찾으십시오.
-       - EMA 문서인 경우 'EMEA/CHMP/...', 'EMA/...', 'CPMP/...' 형태의 참조 번호를 찾으십시오.
-       - 명확하지 않으면 반드시 "N/A"로 기재하십시오.
-    2. summary: 바이오시밀러 개발 실무자를 위한 핵심 요구사항 3가지 (한국어)
+    1. ref_number: 고유 식별자 (FDA Docket Number 또는 EMA 참조 번호). 불명확 시 "N/A".
+    2. summary: CTD(공통기술문서) 작성 시 실무자가 즉각적으로 참고해야 할 핵심 규제 요건을 요약하십시오. 
+       - 단순 나열을 피하고, CMC(품질), 비임상, 임상(PK/PD, 면역원성), 적응증 외삽(Extrapolation), 상호교환성(Interchangeability) 중 해당 문서가 중점적으로 다루는 허용 한계(Margin)와 평가 지표를 구체적으로 명시하십시오.
     
     [가이드라인 텍스트]
     {text[:10000]}
     """
     try:
         response = client.models.generate_content(
-            model='gemini-2.5-flash-lite',
+            model='gemini-2.5-flash-lite', # 요약/추출 작업은 속도와 비용을 고려해 플래시 모델 유지
             contents=prompt,
             config=types.GenerateContentConfig(
                 response_mime_type="application/json",
@@ -76,20 +75,19 @@ def analyze_document(text):
         )
         return json.loads(response.text)
     except Exception as e:
-        print(f"Analysis Error: {e}")
         return {"ref_number": "N/A", "summary": "요약 생성 오류"}
 
 def compare_documents(old_text, new_text):
-    # Step 8: 비교 리포트 출력 형식 규격화 (표 형태 강제)
+    # 인허가 전략 관점의 변경점 비교 프롬프트
     prompt = f"""
-    당신은 RA 전문가입니다. 구버전과 신버전 텍스트를 비교하여 실무적으로 변경된 사항을 분석하십시오.
-    비교 결과는 반드시 아래의 마크다운 표(Table) 형식을 포함하여 작성하십시오.
+    당신은 8년 이상 경력의 글로벌 바이오시밀러 RA 전문가입니다. 구버전과 신버전 텍스트를 비교 분석하십시오.
+    규제 당국의 심사 기조가 어떻게 변화했는지, 허가 지연 리스크를 방지하기 위해 실무적으로 어떤 조치를 취해야 하는지 명확히 작성하십시오.
     
-    | 변경 항목 | 구버전 (기존 기준) | 신버전 (변경된 기준) | 실무 영향도 (High/Med/Low) |
+    결과는 반드시 아래 마크다운 표 형식으로 작성하십시오.
+    
+    | 규제 변경 항목 (CMC/임상/통계 등) | 구버전 허가 기준 | 신버전 허가 기준 | CTD 작성 및 인허가 전략 시 실무 영향 (Action Item) |
     |---|---|---|---|
     | ... | ... | ... | ... |
-    
-    표 작성 후, 하단에 2~3문장으로 종합적인 결론을 덧붙이십시오.
     
     [구버전 텍스트 일부]
     {old_text[:8000]}
@@ -99,7 +97,7 @@ def compare_documents(old_text, new_text):
     """
     try:
         response = client.models.generate_content(
-            model='gemini-2.5-flash-lite',
+            model='gemini-1.5-pro', # 복잡한 비교 분석에는 상위 모델 적용
             contents=prompt
         )
         return response.text
@@ -112,39 +110,27 @@ def process_unsummarized_docs():
     docs = response.data
     
     if not docs:
-        print("요약이 필요한 문서가 없습니다.")
         return
         
     for doc in docs:
-        print(f"\nProcessing: {doc['title']}")
         text = extract_text_from_url(doc['url'])
-        
         if text:
             analysis_result = analyze_document(text)
             ref_num = analysis_result.get("ref_number", "N/A")
             summary = analysis_result.get("summary", "")
-            print(f" -> 식별자: {ref_num}")
             
             if ref_num != "N/A":
                 existing_docs = supabase.table("guidelines").select("url").eq("ref_number", ref_num).neq("url", doc["url"]).execute().data
                 if existing_docs:
                     old_url = existing_docs[0]['url']
-                    print(f" -> 구버전 감지({old_url}). 비교 분석 시작.")
                     old_text = extract_text_from_url(old_url)
-                    
                     if old_text:
                         comparison_text = compare_documents(old_text, text)
                         supabase.table("version_comparisons").insert({
-                            "ref_number": ref_num,
-                            "old_url": old_url,
-                            "new_url": doc["url"],
-                            "comparison_text": comparison_text
+                            "ref_number": ref_num, "old_url": old_url, "new_url": doc["url"], "comparison_text": comparison_text
                         }).execute()
             
-            supabase.table("guidelines").update({
-                "ai_summary": summary,
-                "ref_number": ref_num
-            }).eq("url", doc["url"]).execute()
+            supabase.table("guidelines").update({"ai_summary": summary, "ref_number": ref_num}).eq("url", doc["url"]).execute()
         else:
             supabase.table("guidelines").update({"ai_summary": "텍스트 추출 불가"}).eq("url", doc["url"]).execute()
         time.sleep(10)
