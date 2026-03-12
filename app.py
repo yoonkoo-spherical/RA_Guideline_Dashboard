@@ -61,39 +61,42 @@ def main():
     categories = df['category'].dropna().unique().tolist()
     selected_categories = st.sidebar.multiselect("키워드/카테고리", options=categories, default=categories)
 
-    # 탭을 3개로 확장
+    # 탭 구성
     tab1, tab2, tab3 = st.tabs(["📄 가이드라인 문서 검색", "💬 AI Q&A (RAG)", "⚖️ 다중 문서 수동 비교"])
 
     filtered_df = df[(df['agency'].isin(selected_agencies)) & (df['category'].isin(selected_categories))]
 
-    # --- TAB 1: 가이드라인 검색 (상태 세분화) ---
+    # 상태 및 임베딩 여부 확인 로직
+    def check_summary(text):
+        if pd.isna(text) or str(text).strip() == "": return False
+        if "텍스트 추출 불가" in str(text): return False
+        return True
+        
+    filtered_df['has_summary'] = filtered_df['ai_summary'].apply(check_summary)
+    filtered_df['has_embedding'] = filtered_df['url'].isin(embedded_urls)
+    
+    # 4단계 점수 산출
+    def get_status_score(row):
+        if row['has_summary'] and row['has_embedding']: return 4
+        if row['has_summary'] and not row['has_embedding']: return 3
+        if not row['has_summary'] and row['has_embedding']: return 2
+        return 1
+        
+    filtered_df['status_score'] = filtered_df.apply(get_status_score, axis=1)
+
+    # --- TAB 1: 가이드라인 검색 ---
     with tab1:
         search_query = st.text_input("가이드라인 제목 검색", "")
+        tab1_df = filtered_df.copy()
+        
         if search_query:
-            filtered_df = filtered_df[filtered_df['title'].str.contains(search_query, case=False, na=False)]
-        
-        # 상태 확인 로직
-        def check_summary(text):
-            if pd.isna(text) or str(text).strip() == "": return False
-            if "텍스트 추출 불가" in str(text): return False
-            return True
+            tab1_df = tab1_df[tab1_df['title'].str.contains(search_query, case=False, na=False)]
             
-        filtered_df['has_summary'] = filtered_df['ai_summary'].apply(check_summary)
-        filtered_df['has_embedding'] = filtered_df['url'].isin(embedded_urls)
-        
-        # 4단계 점수 산출
-        def get_status_score(row):
-            if row['has_summary'] and row['has_embedding']: return 4
-            if row['has_summary'] and not row['has_embedding']: return 3
-            if not row['has_summary'] and row['has_embedding']: return 2
-            return 1
-            
-        filtered_df['status_score'] = filtered_df.apply(get_status_score, axis=1)
-        filtered_df = filtered_df.sort_values(by=['status_score', 'title'], ascending=[False, True])
+        tab1_df = tab1_df.sort_values(by=['status_score', 'title'], ascending=[False, True])
 
-        st.subheader(f"검색 결과: {len(filtered_df)} 건")
+        st.subheader(f"검색 결과: {len(tab1_df)} 건")
         
-        for index, row in filtered_df.iterrows():
+        for index, row in tab1_df.iterrows():
             if row['status_score'] == 4: status_icon = "🟢 [완료]"
             elif row['status_score'] == 3: status_icon = "🟡 [요약 완료]"
             elif row['status_score'] == 2: status_icon = "🟡 [임베딩 완료]"
@@ -140,40 +143,46 @@ def main():
     # --- TAB 3: 다중 문서 수동 비교 (체크박스 선택 방식) ---
     with tab3:
         st.markdown("#### ⚖️ 다중 문서 수동 비교 분석")
-        st.write("비교하고자 하는 가이드라인을 체크박스로 선택한 후 분석을 실행하십시오.")
+        st.write("원문 벡터 데이터가 존재하는(임베딩 완료) 가이드라인만 목록에 표시됩니다. 비교하고자 하는 문서를 선택한 후 분석을 실행하십시오.")
         
-        # 선택용 데이터프레임 구성
-        df_for_selection = filtered_df[['title', 'agency', 'category', 'url']].copy()
-        df_for_selection.insert(0, "비교 선택", False)
+        # 임베딩이 완료된 문서만 필터링
+        embedded_only_df = filtered_df[filtered_df['has_embedding'] == True].copy()
         
-        # 체크박스가 포함된 데이터 테이블 렌더링
-        edited_df = st.data_editor(
-            df_for_selection,
-            hide_index=True,
-            column_config={
-                "비교 선택": st.column_config.CheckboxColumn("비교 선택", help="비교할 문서를 선택하세요", default=False),
-                "url": None # UI에서 URL 컬럼은 숨김 처리
-            },
-            disabled=["title", "agency", "category"],
-            use_container_width=True
-        )
-        
-        # 체크된 항목 필터링
-        selected_rows = edited_df[edited_df["비교 선택"]]
-        
-        if st.button("선택한 문서 비교 분석 실행", type="primary"):
-            if len(selected_rows) < 2:
-                st.warning("비교를 수행하려면 문서를 2개 이상 선택해야 합니다.")
-            else:
-                selected_docs_info = selected_rows.to_dict('records')
-                st.info(f"총 {len(selected_docs_info)}개의 문서를 비교 분석합니다. 데이터 크기에 따라 수십 초가 소요될 수 있습니다.")
-                
-                with st.spinner("선택된 문서들의 텍스트를 대조하고 있습니다..."):
-                    comparison_result = rag_engine.compare_multiple_documents(selected_docs_info)
+        if embedded_only_df.empty:
+            st.info("현재 임베딩이 완료된 문서가 없어 비교 기능을 사용할 수 없습니다.")
+        else:
+            # 선택용 데이터프레임 구성
+            df_for_selection = embedded_only_df[['title', 'agency', 'category', 'url']].copy()
+            df_for_selection.insert(0, "비교 선택", False)
+            
+            # 체크박스가 포함된 데이터 테이블 렌더링
+            edited_df = st.data_editor(
+                df_for_selection,
+                hide_index=True,
+                column_config={
+                    "비교 선택": st.column_config.CheckboxColumn("비교 선택", help="비교할 문서를 선택하세요", default=False),
+                    "url": None # UI에서 URL 컬럼은 숨김 처리
+                },
+                disabled=["title", "agency", "category"],
+                use_container_width=True
+            )
+            
+            # 체크된 항목 필터링
+            selected_rows = edited_df[edited_df["비교 선택"]]
+            
+            if st.button("선택한 문서 비교 분석 실행", type="primary"):
+                if len(selected_rows) < 2:
+                    st.warning("비교를 수행하려면 문서를 2개 이상 선택해야 합니다.")
+                else:
+                    selected_docs_info = selected_rows.to_dict('records')
+                    st.info(f"총 {len(selected_docs_info)}개의 문서를 비교 분석합니다. 데이터 크기에 따라 수십 초가 소요될 수 있습니다.")
                     
-                st.divider()
-                st.markdown("#### 📊 분석 결과")
-                st.markdown(comparison_result)
+                    with st.spinner("선택된 문서들의 텍스트를 대조하고 있습니다..."):
+                        comparison_result = rag_engine.compare_multiple_documents(selected_docs_info)
+                        
+                    st.divider()
+                    st.markdown("#### 📊 분석 결과")
+                    st.markdown(comparison_result)
 
 if __name__ == "__main__":
     main()
