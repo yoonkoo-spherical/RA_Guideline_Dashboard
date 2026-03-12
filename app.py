@@ -41,6 +41,10 @@ def save_chat_to_db(role, content):
 def save_analysis_to_db(docs_info, result):
     supabase.table("analysis_history").insert({"docs_info": json.dumps(docs_info, ensure_ascii=False), "comparison_result": result}).execute()
 
+def delete_analysis_record(record_id):
+    """지정된 ID의 분석 이력을 데이터베이스에서 삭제합니다."""
+    supabase.table("analysis_history").delete().eq("id", record_id).execute()
+
 def main():
     st.set_page_config(page_title="RA 가이드라인 대시보드", layout="wide")
     st.title("FDA & EMA 가이드라인 통합 검색 및 분석")
@@ -64,7 +68,6 @@ def main():
     categories = df['category'].dropna().unique().tolist()
     selected_categories = st.sidebar.multiselect("키워드/카테고리", options=categories, default=categories)
 
-    # 총 5개의 탭으로 구성 확장
     tab1, tab2, tab3, tab4, tab5 = st.tabs([
         "📄 문서 검색", "💬 RAG Q&A", "⚖️ 다중 문서 비교", "🔄 신/구버전 비교", "🗂️ 사용 이력 및 다운로드"
     ])
@@ -128,7 +131,7 @@ def main():
 
         if prompt := st.chat_input("질문을 입력하세요."):
             st.session_state.messages.append({"role": "user", "content": prompt})
-            save_chat_to_db("user", prompt) # DB 저장
+            save_chat_to_db("user", prompt)
             
             with st.chat_message("user"): st.markdown(prompt)
             
@@ -142,7 +145,7 @@ def main():
                                 st.markdown(f"**[{i+1}] 출처:** [{source['url']}]({source['url']})")
             
             st.session_state.messages.append({"role": "assistant", "content": response_text, "sources": sources})
-            save_chat_to_db("assistant", response_text) # DB 저장
+            save_chat_to_db("assistant", response_text)
 
     # --- TAB 3: 다중 문서 수동 비교 ---
     with tab3:
@@ -167,7 +170,7 @@ def main():
                     selected_docs_info = selected_rows.to_dict('records')
                     with st.spinner("문서 대조 중..."):
                         comparison_result = rag_engine.compare_multiple_documents(selected_docs_info)
-                        save_analysis_to_db(selected_docs_info, comparison_result) # DB 저장
+                        save_analysis_to_db(selected_docs_info, comparison_result)
                     st.divider()
                     st.markdown("#### 📊 분석 결과")
                     st.markdown(comparison_result)
@@ -175,8 +178,6 @@ def main():
     # --- TAB 4: 신/구버전 자동 비교 이력 ---
     with tab4:
         st.markdown("#### 🔄 규제 가이드라인 신/구버전 변경점 자동 비교")
-        st.write("시스템이 동일한 식별자를 가진 신규 문서를 감지하면 자동으로 생성된 비교 리포트가 이곳에 표시됩니다.")
-        
         if comp_df.empty:
             st.info("현재 문서 간의 버전 업데이트(개정) 이력이 감지되지 않았습니다.")
         else:
@@ -186,18 +187,14 @@ def main():
                     st.divider()
                     st.markdown(row['comparison_text'])
 
-# app.py 상단에 아래 라이브러리 임포트 추가 필수
-    # import markdown
-
     # --- TAB 5: 사용 이력 및 다운로드 ---
     with tab5:
         st.markdown("#### 🗂️ RAG 채팅 및 분석 전체 이력")
-        st.write("새로고침 후에도 유지되는 전체 기록입니다. 데이터를 일반 웹 브라우저에서 읽기 편한 형식(.html)으로 다운로드할 수 있습니다.")
         
         chat_data = supabase.table("chat_history").select("*").order("created_at", desc=False).execute().data
         analysis_data = supabase.table("analysis_history").select("*").order("created_at", desc=True).execute().data
 
-        # 다운로드 문서용 공통 CSS 스타일
+        # HTML 다운로드용 공통 CSS
         css_style = """
         <style>
             body { font-family: 'Malgun Gothic', 'Apple SD Gothic Neo', sans-serif; line-height: 1.6; color: #333; max-width: 1000px; margin: 0 auto; padding: 30px; }
@@ -208,7 +205,7 @@ def main():
             tr:nth-child(even) { background-color: #fafafa; }
             blockquote { border-left: 4px solid #0052cc; margin: 0; padding-left: 15px; color: #555; background-color: #f9f9f9; padding: 10px; }
             hr { border: 0; border-top: 1px solid #eee; margin: 30px 0; }
-            .date-stamp { color: #888; font-size: 0.9em; }
+            .date-stamp { color: #888; font-size: 0.9em; margin-bottom: 20px; }
         </style>
         """
 
@@ -222,13 +219,12 @@ def main():
                     role_kr = "사용자" if chat['role'] == 'user' else "AI"
                     md_chat += f"### {role_kr}\n<div class='date-stamp'>작성일시: {str(chat['created_at'])[:16]}</div>\n\n{chat['content']}\n\n---\n\n"
                 
-                # 마크다운을 HTML 표(tables) 확장 기능과 함께 변환
                 html_chat_content = markdown.markdown(md_chat, extensions=['tables'])
                 final_html_chat = f"<!DOCTYPE html><html><head><meta charset='utf-8'>{css_style}</head><body>{html_chat_content}</body></html>"
                 
-                st.download_button(label="채팅 기록 다운로드 (.html)", data=final_html_chat, file_name="rag_chat_history.html", mime="text/html")
+                st.download_button(label="전체 채팅 기록 다운로드 (.html)", data=final_html_chat, file_name="rag_chat_history.html", mime="text/html")
                 
-                with st.container(height=500):
+                with st.container(height=600):
                     for chat in chat_data:
                         role_kr = "👤 사용자" if chat['role'] == 'user' else "🤖 AI"
                         st.markdown(f"**{role_kr}** ({str(chat['created_at'])[:16]})")
@@ -240,25 +236,50 @@ def main():
         with col2:
             st.subheader("⚖️ 수동 비교 분석 기록")
             if analysis_data:
-                md_analysis = "# 다중 문서 수동 비교 분석 리포트\n\n"
                 for r in analysis_data:
-                    md_analysis += f"## 분석 일시: {str(r['created_at'])[:16]}\n\n"
+                    # 파일명 생성 로직
+                    doc_titles_list = []
+                    file_title_prefix = "다중문서비교"
                     try:
                         docs = json.loads(r['docs_info'])
-                        doc_titles = "<br>".join([f"- {d.get('title', 'Unknown')} ({d.get('agency', 'N/A')})" for d in docs])
-                        md_analysis += f"**[분석 대상 문서]**<br>{doc_titles}\n\n"
-                    except: pass
-                    md_analysis += f"{r['comparison_result']}\n\n---\n\n"
-                
-                html_analysis_content = markdown.markdown(md_analysis, extensions=['tables'])
-                final_html_analysis = f"<!DOCTYPE html><html><head><meta charset='utf-8'>{css_style}</head><body>{html_analysis_content}</body></html>"
-                
-                st.download_button(label="비교 분석 기록 다운로드 (.html)", data=final_html_analysis, file_name="analysis_history.html", mime="text/html")
-                
-                with st.container(height=500):
-                    for r in analysis_data:
-                        with st.expander(f"분석 일시: {str(r['created_at'])[:16]}"):
-                            st.markdown(r['comparison_result'])
+                        doc_titles_list = [f"- {d.get('title', 'Unknown')} ({d.get('agency', 'N/A')})" for d in docs]
+                        agencies = [d.get('agency', 'NA') for d in docs]
+                        file_title_prefix = "_vs_".join(agencies) + "_비교"
+                    except:
+                        pass
+                    
+                    raw_time = str(r['created_at'])[:16]
+                    safe_time = raw_time.replace(":", "").replace("-", "").replace(" ", "_")
+                    file_name = f"{file_title_prefix}_{safe_time}.html"
+
+                    # 개별 다운로드용 HTML 구성
+                    md_analysis = f"# 다중 문서 수동 비교 분석 리포트\n\n"
+                    md_analysis += f"<div class='date-stamp'>분석 일시: {raw_time}</div>\n\n"
+                    if doc_titles_list:
+                        md_analysis += f"**[분석 대상 문서]**<br>" + "<br>".join(doc_titles_list) + "\n\n<hr>\n\n"
+                    md_analysis += f"{r['comparison_result']}"
+                    
+                    html_analysis_content = markdown.markdown(md_analysis, extensions=['tables'])
+                    final_html_analysis = f"<!DOCTYPE html><html><head><meta charset='utf-8'>{css_style}</head><body>{html_analysis_content}</body></html>"
+                    
+                    # UI 렌더링 (다운로드 버튼 및 삭제 버튼 분리)
+                    with st.expander(f"분석 일시: {raw_time} | {file_title_prefix}"):
+                        btn_col1, btn_col2 = st.columns([1, 1])
+                        with btn_col1:
+                            st.download_button(
+                                label="📥 HTML 다운로드", 
+                                data=final_html_analysis, 
+                                file_name=file_name, 
+                                mime="text/html",
+                                key=f"dl_btn_{r['id']}"
+                            )
+                        with btn_col2:
+                            if st.button("🗑️ 기록 삭제", key=f"del_btn_{r['id']}"):
+                                delete_analysis_record(r['id'])
+                                st.rerun()
+                                
+                        st.divider()
+                        st.markdown(r['comparison_result'])
             else:
                 st.info("저장된 비교 분석 기록이 없습니다.")
 
