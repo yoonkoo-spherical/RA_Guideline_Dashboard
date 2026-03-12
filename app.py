@@ -3,7 +3,6 @@ import pandas as pd
 from supabase import create_client, Client
 import rag_engine
 
-# --- 1. 데이터베이스 연결 및 데이터 로드 ---
 @st.cache_resource
 def init_connection():
     url = st.secrets["SUPABASE_URL"]
@@ -25,7 +24,6 @@ def load_data():
     
     return df, comp_df, embedded_urls
 
-# --- 2. 진행률 계산 함수 ---
 def calculate_progress(df, embedded_urls):
     if df.empty: return 0, 0, 0, 0, 0
     total_docs = len(df)
@@ -35,7 +33,6 @@ def calculate_progress(df, embedded_urls):
     embed_pct = int((embedded_docs / total_docs) * 100) if total_docs > 0 else 0
     return total_docs, summarized_docs, summary_pct, embedded_docs, embed_pct
 
-# --- 3. 메인 애플리케이션 ---
 def main():
     st.set_page_config(page_title="RA 가이드라인 대시보드", layout="wide")
     st.title("FDA & EMA 가이드라인 통합 검색 및 분석")
@@ -46,10 +43,8 @@ def main():
         st.warning("데이터베이스에 데이터가 없습니다.")
         return
 
-    # 사이드바 설정
     st.sidebar.header("📊 데이터 처리 현황")
     total, sum_cnt, sum_pct, emb_cnt, emb_pct = calculate_progress(df, embedded_urls)
-    
     st.sidebar.metric("전체 수집 문서", f"{total} 건")
     st.sidebar.progress(sum_pct / 100, text=f"AI 요약: {sum_pct}% ({sum_cnt}/{total})")
     st.sidebar.progress(emb_pct / 100, text=f"AI 임베딩: {emb_pct}% ({emb_cnt}/{total})")
@@ -61,12 +56,10 @@ def main():
     categories = df['category'].dropna().unique().tolist()
     selected_categories = st.sidebar.multiselect("키워드/카테고리", options=categories, default=categories)
 
-    # 탭 구성
     tab1, tab2, tab3 = st.tabs(["📄 가이드라인 문서 검색", "💬 AI Q&A (RAG)", "⚖️ 다중 문서 수동 비교"])
 
     filtered_df = df[(df['agency'].isin(selected_agencies)) & (df['category'].isin(selected_categories))]
 
-    # 상태 및 임베딩 여부 확인 로직
     def check_summary(text):
         if pd.isna(text) or str(text).strip() == "": return False
         if "텍스트 추출 불가" in str(text): return False
@@ -75,7 +68,6 @@ def main():
     filtered_df['has_summary'] = filtered_df['ai_summary'].apply(check_summary)
     filtered_df['has_embedding'] = filtered_df['url'].isin(embedded_urls)
     
-    # 4단계 점수 산출
     def get_status_score(row):
         if row['has_summary'] and row['has_embedding']: return 4
         if row['has_summary'] and not row['has_embedding']: return 3
@@ -88,12 +80,9 @@ def main():
     with tab1:
         search_query = st.text_input("가이드라인 제목 검색", "")
         tab1_df = filtered_df.copy()
-        
         if search_query:
             tab1_df = tab1_df[tab1_df['title'].str.contains(search_query, case=False, na=False)]
-            
         tab1_df = tab1_df.sort_values(by=['status_score', 'title'], ascending=[False, True])
-
         st.subheader(f"검색 결과: {len(tab1_df)} 건")
         
         for index, row in tab1_df.iterrows():
@@ -124,50 +113,64 @@ def main():
                         for _, comp_row in doc_comparisons.iterrows():
                             st.write(comp_row['comparison_text'])
 
-    # --- TAB 2: RAG 기반 Q&A 채팅 ---
+    # --- TAB 2: RAG 기반 Q&A 채팅 (Step 9: 출처 확인 기능 추가) ---
     with tab2:
         st.markdown("#### 규제 가이드라인 AI 어시스턴트")
         if "messages" not in st.session_state: st.session_state.messages = []
+        
+        # 채팅 메시지 렌더링
         for message in st.session_state.messages:
-            with st.chat_message(message["role"]): st.markdown(message["content"])
+            with st.chat_message(message["role"]): 
+                st.markdown(message["content"])
+                # AI 답변일 경우 출처(소스) 청크를 토글 형태로 렌더링
+                if message["role"] == "assistant" and message.get("sources"):
+                    with st.expander("🔍 AI가 참고한 원문 조각(Chunks) 확인"):
+                        for i, source in enumerate(message["sources"]):
+                            st.markdown(f"**[{i+1}] 출처 링크:** [{source['url']}]({source['url']})")
+                            st.info(source['content'])
 
         if prompt := st.chat_input("규제 가이드라인에 대해 질문해보세요."):
             st.session_state.messages.append({"role": "user", "content": prompt})
             with st.chat_message("user"): st.markdown(prompt)
+            
             with st.chat_message("assistant"):
                 with st.spinner("답변을 생성 중입니다..."):
-                    response = rag_engine.ask_guideline(prompt)
-                    st.markdown(response)
-            st.session_state.messages.append({"role": "assistant", "content": response})
+                    # 텍스트와 원문 조각 리스트를 분리해서 받음
+                    response_text, sources = rag_engine.ask_guideline(prompt)
+                    st.markdown(response_text)
+                    
+                    if sources:
+                        with st.expander("🔍 AI가 참고한 원문 조각(Chunks) 확인"):
+                            for i, source in enumerate(sources):
+                                st.markdown(f"**[{i+1}] 출처 링크:** [{source['url']}]({source['url']})")
+                                st.info(source['content'])
+            
+            # session_state에 답변과 출처 데이터를 함께 저장
+            st.session_state.messages.append({
+                "role": "assistant", 
+                "content": response_text,
+                "sources": sources
+            })
 
-    # --- TAB 3: 다중 문서 수동 비교 (체크박스 선택 방식) ---
+    # --- TAB 3: 다중 문서 수동 비교 ---
     with tab3:
         st.markdown("#### ⚖️ 다중 문서 수동 비교 분석")
-        st.write("원문 벡터 데이터가 존재하는(임베딩 완료) 가이드라인만 목록에 표시됩니다. 비교하고자 하는 문서를 선택한 후 분석을 실행하십시오.")
-        
-        # 임베딩이 완료된 문서만 필터링
         embedded_only_df = filtered_df[filtered_df['has_embedding'] == True].copy()
         
         if embedded_only_df.empty:
             st.info("현재 임베딩이 완료된 문서가 없어 비교 기능을 사용할 수 없습니다.")
         else:
-            # 선택용 데이터프레임 구성
             df_for_selection = embedded_only_df[['title', 'agency', 'category', 'url']].copy()
             df_for_selection.insert(0, "비교 선택", False)
             
-            # 체크박스가 포함된 데이터 테이블 렌더링
             edited_df = st.data_editor(
                 df_for_selection,
                 hide_index=True,
-                column_config={
-                    "비교 선택": st.column_config.CheckboxColumn("비교 선택", help="비교할 문서를 선택하세요", default=False),
-                    "url": None # UI에서 URL 컬럼은 숨김 처리
-                },
+                column_config={"비교 선택": st.column_config.CheckboxColumn("비교 선택", help="비교할 문서를 선택하세요", default=False), "url": None},
                 disabled=["title", "agency", "category"],
                 use_container_width=True
             )
             
-            # 체크된 항목 필터링
             selected_rows = edited_df[edited_df["비교 선택"]]
             
             if st.button("선택한 문서 비교 분석 실행", type="primary"):
@@ -175,11 +178,9 @@ def main():
                     st.warning("비교를 수행하려면 문서를 2개 이상 선택해야 합니다.")
                 else:
                     selected_docs_info = selected_rows.to_dict('records')
-                    st.info(f"총 {len(selected_docs_info)}개의 문서를 비교 분석합니다. 데이터 크기에 따라 수십 초가 소요될 수 있습니다.")
-                    
+                    st.info(f"총 {len(selected_docs_info)}개의 문서를 비교 분석합니다.")
                     with st.spinner("선택된 문서들의 텍스트를 대조하고 있습니다..."):
                         comparison_result = rag_engine.compare_multiple_documents(selected_docs_info)
-                        
                     st.divider()
                     st.markdown("#### 📊 분석 결과")
                     st.markdown(comparison_result)
