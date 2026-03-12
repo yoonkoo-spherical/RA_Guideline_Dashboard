@@ -27,22 +27,12 @@ def load_data():
 
 # --- 2. 진행률 계산 함수 ---
 def calculate_progress(df, embedded_urls):
-    if df.empty:
-        return 0, 0, 0, 0, 0
-        
+    if df.empty: return 0, 0, 0, 0, 0
     total_docs = len(df)
-    
-    summarized_docs = len(df[
-        df['ai_summary'].notna() & 
-        (df['ai_summary'] != '') & 
-        (~df['ai_summary'].str.contains('텍스트 추출 불가', na=False))
-    ])
-    
+    summarized_docs = len(df[df['ai_summary'].notna() & (df['ai_summary'] != '') & (~df['ai_summary'].str.contains('텍스트 추출 불가', na=False))])
     embedded_docs = len([url for url in df['url'] if url in embedded_urls])
-    
     summary_pct = int((summarized_docs / total_docs) * 100) if total_docs > 0 else 0
     embed_pct = int((embedded_docs / total_docs) * 100) if total_docs > 0 else 0
-    
     return total_docs, summarized_docs, summary_pct, embedded_docs, embed_pct
 
 # --- 3. 메인 애플리케이션 ---
@@ -56,37 +46,33 @@ def main():
         st.warning("데이터베이스에 데이터가 없습니다.")
         return
 
+    # 사이드바 설정
     st.sidebar.header("📊 데이터 처리 현황")
     total, sum_cnt, sum_pct, emb_cnt, emb_pct = calculate_progress(df, embedded_urls)
     
     st.sidebar.metric("전체 수집 문서", f"{total} 건")
-    st.sidebar.progress(sum_pct / 100, text=f"AI 요약 진행률: {sum_pct}% ({sum_cnt}/{total})")
-    st.sidebar.progress(emb_pct / 100, text=f"AI 임베딩 진행률: {emb_pct}% ({emb_cnt}/{total})")
-    
+    st.sidebar.progress(sum_pct / 100, text=f"AI 요약: {sum_pct}% ({sum_cnt}/{total})")
+    st.sidebar.progress(emb_pct / 100, text=f"AI 임베딩: {emb_pct}% ({emb_cnt}/{total})")
     st.sidebar.divider()
     
     st.sidebar.header("🔍 필터 옵션")
     agencies = df['agency'].dropna().unique().tolist()
     selected_agencies = st.sidebar.multiselect("규제기관 (Agency)", options=agencies, default=agencies)
-    
     categories = df['category'].dropna().unique().tolist()
     selected_categories = st.sidebar.multiselect("키워드/카테고리", options=categories, default=categories)
 
-    tab1, tab2 = st.tabs(["📄 가이드라인 문서 검색", "💬 AI 가이드라인 Q&A (RAG)"])
+    # 탭을 3개로 확장
+    tab1, tab2, tab3 = st.tabs(["📄 가이드라인 문서 검색", "💬 AI Q&A (RAG)", "⚖️ 다중 문서 수동 비교"])
 
-    # --- TAB 1: 가이드라인 검색 및 상태 표시 ---
+    filtered_df = df[(df['agency'].isin(selected_agencies)) & (df['category'].isin(selected_categories))]
+
+    # --- TAB 1: 가이드라인 검색 (상태 세분화) ---
     with tab1:
         search_query = st.text_input("가이드라인 제목 검색", "")
-        
-        filtered_df = df[
-            (df['agency'].isin(selected_agencies)) &
-            (df['category'].isin(selected_categories))
-        ]
-        
         if search_query:
             filtered_df = filtered_df[filtered_df['title'].str.contains(search_query, case=False, na=False)]
         
-        # 정렬 및 상태 점수 산출 로직
+        # 상태 확인 로직
         def check_summary(text):
             if pd.isna(text) or str(text).strip() == "": return False
             if "텍스트 추출 불가" in str(text): return False
@@ -95,9 +81,11 @@ def main():
         filtered_df['has_summary'] = filtered_df['ai_summary'].apply(check_summary)
         filtered_df['has_embedding'] = filtered_df['url'].isin(embedded_urls)
         
+        # 4단계 점수 산출
         def get_status_score(row):
-            if row['has_summary'] and row['has_embedding']: return 3
-            if row['has_summary'] or row['has_embedding']: return 2
+            if row['has_summary'] and row['has_embedding']: return 4
+            if row['has_summary'] and not row['has_embedding']: return 3
+            if not row['has_summary'] and row['has_embedding']: return 2
             return 1
             
         filtered_df['status_score'] = filtered_df.apply(get_status_score, axis=1)
@@ -106,68 +94,86 @@ def main():
         st.subheader(f"검색 결과: {len(filtered_df)} 건")
         
         for index, row in filtered_df.iterrows():
-            # 상태에 따른 아이콘 및 텍스트 할당
-            if row['status_score'] == 3:
-                status_icon = "🟢 [완료]"
-            elif row['status_score'] == 2:
-                status_icon = "🟡 [부분 완료]"
-            else:
-                status_icon = "⏳ [대기중]"
+            if row['status_score'] == 4: status_icon = "🟢 [완료]"
+            elif row['status_score'] == 3: status_icon = "🟡 [요약 완료]"
+            elif row['status_score'] == 2: status_icon = "🟡 [임베딩 완료]"
+            else: status_icon = "⏳ [대기중]"
 
             with st.expander(f"{status_icon} {row['title']} ({row['agency']})"):
                 col1, col2 = st.columns([3, 1])
-                
                 with col1:
-                    ref_text = row.get('ref_number', 'N/A')
-                    st.write(f"**발행기관:** {row['agency']} | **식별자:** {ref_text} | **상태:** {row['status']} | **분류:** {row['category']} | **발행일:** {row['published_date']}")
-                    st.markdown(f"[🔗 원본 가이드라인 문서 열기]({row['url']})")
-                    
+                    st.write(f"**기관:** {row['agency']} | **식별자:** {row.get('ref_number', 'N/A')} | **분류:** {row['category']}")
+                    st.markdown(f"[🔗 원본 문서 열기]({row['url']})")
+                
                 st.divider()
-                
-                # 요약 정보 출력
                 st.markdown("#### 💡 AI 핵심 요약")
-                if row['has_summary']:
-                    st.write(row['ai_summary'])
-                else:
-                    st.info("현재 AI 요약이 대기 중이거나 원문 텍스트 추출이 불가능한 문서입니다.")
+                if row['has_summary']: st.write(row['ai_summary'])
+                else: st.info("AI 요약 대기 중이거나 추출 불가 문서입니다.")
                 
-                # 임베딩 누락 경고 출력
                 if not row['has_embedding']:
-                    st.warning("⚠️ 이 문서는 아직 RAG 검색용 벡터 DB에 임베딩되지 않아 Q&A 검색 결과에 포함되지 않습니다.")
+                    st.warning("⚠️ RAG 검색용 벡터 DB에 임베딩되지 않은 문서입니다.")
                 
-                # 변경점 비교 리포트 출력
                 if not comp_df.empty:
                     doc_comparisons = comp_df[comp_df['new_url'] == row['url']]
                     if not doc_comparisons.empty:
                         st.divider()
-                        st.markdown("#### 🔄 구버전 대비 변경점 분석 (Version History)")
+                        st.markdown("#### 🔄 구버전 대비 변경점 분석")
                         for _, comp_row in doc_comparisons.iterrows():
-                            st.info(f"**비교 대상 구버전 URL:** {comp_row['old_url']}")
                             st.write(comp_row['comparison_text'])
 
     # --- TAB 2: RAG 기반 Q&A 채팅 ---
     with tab2:
         st.markdown("#### 규제 가이드라인 AI 어시스턴트")
-        st.write("임베딩이 완료된 문서를 바탕으로 질문에 답변합니다. (현재 벡터 데이터베이스 기반 검색 적용)")
-        
-        if "messages" not in st.session_state:
-            st.session_state.messages = []
-
+        if "messages" not in st.session_state: st.session_state.messages = []
         for message in st.session_state.messages:
-            with st.chat_message(message["role"]):
-                st.markdown(message["content"])
+            with st.chat_message(message["role"]): st.markdown(message["content"])
 
-        if prompt := st.chat_input("규제 가이드라인에 대해 질문해보세요. (예: 바이오시밀러 임상 1상 면역원성 기준은?)"):
+        if prompt := st.chat_input("규제 가이드라인에 대해 질문해보세요."):
             st.session_state.messages.append({"role": "user", "content": prompt})
-            with st.chat_message("user"):
-                st.markdown(prompt)
-
+            with st.chat_message("user"): st.markdown(prompt)
             with st.chat_message("assistant"):
-                with st.spinner("관련 가이드라인을 검색하고 답변을 생성 중입니다..."):
+                with st.spinner("답변을 생성 중입니다..."):
                     response = rag_engine.ask_guideline(prompt)
                     st.markdown(response)
-            
             st.session_state.messages.append({"role": "assistant", "content": response})
+
+    # --- TAB 3: 다중 문서 수동 비교 (체크박스 선택 방식) ---
+    with tab3:
+        st.markdown("#### ⚖️ 다중 문서 수동 비교 분석")
+        st.write("비교하고자 하는 가이드라인을 체크박스로 선택한 후 분석을 실행하십시오.")
+        
+        # 선택용 데이터프레임 구성
+        df_for_selection = filtered_df[['title', 'agency', 'category', 'url']].copy()
+        df_for_selection.insert(0, "비교 선택", False)
+        
+        # 체크박스가 포함된 데이터 테이블 렌더링
+        edited_df = st.data_editor(
+            df_for_selection,
+            hide_index=True,
+            column_config={
+                "비교 선택": st.column_config.CheckboxColumn("비교 선택", help="비교할 문서를 선택하세요", default=False),
+                "url": None # UI에서 URL 컬럼은 숨김 처리
+            },
+            disabled=["title", "agency", "category"],
+            use_container_width=True
+        )
+        
+        # 체크된 항목 필터링
+        selected_rows = edited_df[edited_df["비교 선택"]]
+        
+        if st.button("선택한 문서 비교 분석 실행", type="primary"):
+            if len(selected_rows) < 2:
+                st.warning("비교를 수행하려면 문서를 2개 이상 선택해야 합니다.")
+            else:
+                selected_docs_info = selected_rows.to_dict('records')
+                st.info(f"총 {len(selected_docs_info)}개의 문서를 비교 분석합니다. 데이터 크기에 따라 수십 초가 소요될 수 있습니다.")
+                
+                with st.spinner("선택된 문서들의 텍스트를 대조하고 있습니다..."):
+                    comparison_result = rag_engine.compare_multiple_documents(selected_docs_info)
+                    
+                st.divider()
+                st.markdown("#### 📊 분석 결과")
+                st.markdown(comparison_result)
 
 if __name__ == "__main__":
     main()
