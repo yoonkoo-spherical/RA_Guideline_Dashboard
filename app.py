@@ -2,6 +2,7 @@ import streamlit as st
 import pandas as pd
 from supabase import create_client, Client
 import rag_engine
+import json
 
 @st.cache_resource
 def init_connection():
@@ -33,6 +34,12 @@ def calculate_progress(df, embedded_urls):
     embed_pct = int((embedded_docs / total_docs) * 100) if total_docs > 0 else 0
     return total_docs, summarized_docs, summary_pct, embedded_docs, embed_pct
 
+def save_chat_to_db(role, content):
+    supabase.table("chat_history").insert({"role": role, "content": content}).execute()
+
+def save_analysis_to_db(docs_info, result):
+    supabase.table("analysis_history").insert({"docs_info": json.dumps(docs_info, ensure_ascii=False), "comparison_result": result}).execute()
+
 def main():
     st.set_page_config(page_title="RA 가이드라인 대시보드", layout="wide")
     st.title("FDA & EMA 가이드라인 통합 검색 및 분석")
@@ -56,7 +63,10 @@ def main():
     categories = df['category'].dropna().unique().tolist()
     selected_categories = st.sidebar.multiselect("키워드/카테고리", options=categories, default=categories)
 
-    tab1, tab2, tab3 = st.tabs(["📄 가이드라인 문서 검색", "💬 AI Q&A (RAG)", "⚖️ 다중 문서 수동 비교"])
+    # 총 5개의 탭으로 구성 확장
+    tab1, tab2, tab3, tab4, tab5 = st.tabs([
+        "📄 문서 검색", "💬 RAG Q&A", "⚖️ 다중 문서 비교", "🔄 신/구버전 비교", "🗂️ 사용 이력 및 다운로드"
+    ])
 
     filtered_df = df[(df['agency'].isin(selected_agencies)) & (df['category'].isin(selected_categories))]
 
@@ -96,61 +106,42 @@ def main():
                 with col1:
                     st.write(f"**기관:** {row['agency']} | **식별자:** {row.get('ref_number', 'N/A')} | **분류:** {row['category']}")
                     st.markdown(f"[🔗 원본 문서 열기]({row['url']})")
-                
                 st.divider()
                 st.markdown("#### 💡 AI 핵심 요약")
                 if row['has_summary']: st.write(row['ai_summary'])
                 else: st.info("AI 요약 대기 중이거나 추출 불가 문서입니다.")
-                
-                if not row['has_embedding']:
-                    st.warning("⚠️ RAG 검색용 벡터 DB에 임베딩되지 않은 문서입니다.")
-                
-                if not comp_df.empty:
-                    doc_comparisons = comp_df[comp_df['new_url'] == row['url']]
-                    if not doc_comparisons.empty:
-                        st.divider()
-                        st.markdown("#### 🔄 구버전 대비 변경점 분석")
-                        for _, comp_row in doc_comparisons.iterrows():
-                            st.write(comp_row['comparison_text'])
+                if not row['has_embedding']: st.warning("⚠️ RAG 검색용 벡터 DB에 임베딩되지 않은 문서입니다.")
 
-    # --- TAB 2: RAG 기반 Q&A 채팅 (Step 9: 출처 확인 기능 추가) ---
+    # --- TAB 2: RAG Q&A 채팅 ---
     with tab2:
-        st.markdown("#### 규제 가이드라인 AI 어시스턴트")
+        st.markdown("#### 규제 가이드라인 AI 어시스턴트 (gemini-2.5-flash)")
         if "messages" not in st.session_state: st.session_state.messages = []
         
-        # 채팅 메시지 렌더링
         for message in st.session_state.messages:
             with st.chat_message(message["role"]): 
                 st.markdown(message["content"])
-                # AI 답변일 경우 출처(소스) 청크를 토글 형태로 렌더링
                 if message["role"] == "assistant" and message.get("sources"):
-                    with st.expander("🔍 AI가 참고한 원문 조각(Chunks) 확인"):
+                    with st.expander("🔍 AI가 참고한 원문 조각 확인"):
                         for i, source in enumerate(message["sources"]):
-                            st.markdown(f"**[{i+1}] 출처 링크:** [{source['url']}]({source['url']})")
-                            st.info(source['content'])
+                            st.markdown(f"**[{i+1}] 출처:** [{source['url']}]({source['url']})")
 
-        if prompt := st.chat_input("규제 가이드라인에 대해 질문해보세요."):
+        if prompt := st.chat_input("질문을 입력하세요."):
             st.session_state.messages.append({"role": "user", "content": prompt})
+            save_chat_to_db("user", prompt) # DB 저장
+            
             with st.chat_message("user"): st.markdown(prompt)
             
             with st.chat_message("assistant"):
-                with st.spinner("답변을 생성 중입니다..."):
-                    # 텍스트와 원문 조각 리스트를 분리해서 받음
+                with st.spinner("답변 생성 중..."):
                     response_text, sources = rag_engine.ask_guideline(prompt)
                     st.markdown(response_text)
-                    
                     if sources:
-                        with st.expander("🔍 AI가 참고한 원문 조각(Chunks) 확인"):
+                        with st.expander("🔍 AI가 참고한 원문 조각 확인"):
                             for i, source in enumerate(sources):
-                                st.markdown(f"**[{i+1}] 출처 링크:** [{source['url']}]({source['url']})")
-                                st.info(source['content'])
+                                st.markdown(f"**[{i+1}] 출처:** [{source['url']}]({source['url']})")
             
-            # session_state에 답변과 출처 데이터를 함께 저장
-            st.session_state.messages.append({
-                "role": "assistant", 
-                "content": response_text,
-                "sources": sources
-            })
+            st.session_state.messages.append({"role": "assistant", "content": response_text, "sources": sources})
+            save_chat_to_db("assistant", response_text) # DB 저장
 
     # --- TAB 3: 다중 문서 수동 비교 ---
     with tab3:
@@ -158,32 +149,94 @@ def main():
         embedded_only_df = filtered_df[filtered_df['has_embedding'] == True].copy()
         
         if embedded_only_df.empty:
-            st.info("현재 임베딩이 완료된 문서가 없어 비교 기능을 사용할 수 없습니다.")
+            st.info("임베딩이 완료된 문서가 없습니다.")
         else:
             df_for_selection = embedded_only_df[['title', 'agency', 'category', 'url']].copy()
             df_for_selection.insert(0, "비교 선택", False)
-            
             edited_df = st.data_editor(
-                df_for_selection,
-                hide_index=True,
-                column_config={"비교 선택": st.column_config.CheckboxColumn("비교 선택", help="비교할 문서를 선택하세요", default=False), "url": None},
-                disabled=["title", "agency", "category"],
-                use_container_width=True
+                df_for_selection, hide_index=True,
+                column_config={"비교 선택": st.column_config.CheckboxColumn("비교 선택", default=False), "url": None},
+                disabled=["title", "agency", "category"], use_container_width=True
             )
             
             selected_rows = edited_df[edited_df["비교 선택"]]
-            
-            if st.button("선택한 문서 비교 분석 실행", type="primary"):
-                if len(selected_rows) < 2:
-                    st.warning("비교를 수행하려면 문서를 2개 이상 선택해야 합니다.")
+            if st.button("비교 분석 실행", type="primary"):
+                if len(selected_rows) < 2: st.warning("문서를 2개 이상 선택해야 합니다.")
                 else:
                     selected_docs_info = selected_rows.to_dict('records')
-                    st.info(f"총 {len(selected_docs_info)}개의 문서를 비교 분석합니다.")
-                    with st.spinner("선택된 문서들의 텍스트를 대조하고 있습니다..."):
+                    with st.spinner("문서 대조 중..."):
                         comparison_result = rag_engine.compare_multiple_documents(selected_docs_info)
+                        save_analysis_to_db(selected_docs_info, comparison_result) # DB 저장
                     st.divider()
                     st.markdown("#### 📊 분석 결과")
                     st.markdown(comparison_result)
+
+    # --- TAB 4: 신/구버전 자동 비교 이력 ---
+    with tab4:
+        st.markdown("#### 🔄 규제 가이드라인 신/구버전 변경점 자동 비교")
+        st.write("시스템이 동일한 식별자를 가진 신규 문서를 감지하면 자동으로 생성된 비교 리포트가 이곳에 표시됩니다.")
+        
+        if comp_df.empty:
+            st.info("현재 문서 간의 버전 업데이트(개정) 이력이 감지되지 않았습니다.")
+        else:
+            for index, row in comp_df.iterrows():
+                with st.expander(f"업데이트 식별자: {row['ref_number']} | 감지일: {str(row['created_at'])[:10]}"):
+                    st.markdown(f"**[구버전 원문]({row['old_url']}) ➡️ [신버전 원문]({row['new_url']})**")
+                    st.divider()
+                    st.markdown(row['comparison_text'])
+
+    # --- TAB 5: 사용 이력 및 마크다운 다운로드 ---
+    with tab5:
+        st.markdown("#### 🗂️ RAG 채팅 및 분석 전체 이력")
+        st.write("새로고침 후에도 유지되는 전체 기록입니다. 데이터를 마크다운(.md) 포맷으로 다운로드할 수 있습니다.")
+        
+        # 채팅 이력 불러오기
+        chat_data = supabase.table("chat_history").select("*").order("created_at", desc=False).execute().data
+        analysis_data = supabase.table("analysis_history").select("*").order("created_at", desc=True).execute().data
+
+        col1, col2 = st.columns(2)
+        
+        with col1:
+            st.subheader("💬 RAG 채팅 기록")
+            if chat_data:
+                md_chat = "# AI RAG 채팅 기록\n\n"
+                for chat in chat_data:
+                    role_kr = "사용자" if chat['role'] == 'user' else "AI"
+                    md_chat += f"**{role_kr}** ({str(chat['created_at'])[:16]}):\n{chat['content']}\n\n---\n\n"
+                
+                st.download_button(label="채팅 기록 다운로드 (.md)", data=md_chat, file_name="rag_chat_history.md", mime="text/markdown")
+                
+                with st.container(height=400):
+                    for chat in chat_data:
+                        role_kr = "👤 사용자" if chat['role'] == 'user' else "🤖 AI"
+                        st.markdown(f"**{role_kr}**")
+                        st.write(chat['content'])
+                        st.divider()
+            else:
+                st.info("저장된 채팅 기록이 없습니다.")
+
+        with col2:
+            st.subheader("⚖️ 수동 비교 분석 기록")
+            if analysis_data:
+                md_analysis = "# 다중 문서 수동 비교 분석 기록\n\n"
+                for r in analysis_data:
+                    md_analysis += f"## 분석 일시: {str(r['created_at'])[:16]}\n\n"
+                    # 대상 문서 목록 정리
+                    try:
+                        docs = json.loads(r['docs_info'])
+                        doc_titles = ", ".join([d.get('title', 'Unknown') for d in docs])
+                        md_analysis += f"**분석 대상:** {doc_titles}\n\n"
+                    except: pass
+                    md_analysis += f"**분석 결과:**\n{r['comparison_result']}\n\n---\n\n"
+                
+                st.download_button(label="비교 분석 기록 다운로드 (.md)", data=md_analysis, file_name="analysis_history.md", mime="text/markdown")
+                
+                with st.container(height=400):
+                    for r in analysis_data:
+                        with st.expander(f"분석 일시: {str(r['created_at'])[:16]}"):
+                            st.markdown(r['comparison_result'])
+            else:
+                st.info("저장된 비교 분석 기록이 없습니다.")
 
 if __name__ == "__main__":
     main()
