@@ -28,7 +28,8 @@ def load_data():
     comp_response = supabase.table("version_comparisons").select("*").execute()
     comp_df = pd.DataFrame(comp_response.data)
     
-    chunk_response = supabase.table("document_chunks").select("url").execute()
+    # 수정: content가 'FAILED'인 더미 데이터는 임베딩 완료로 취급하지 않음
+    chunk_response = supabase.table("document_chunks").select("url").neq("content", "FAILED").execute()
     embedded_urls = set([item['url'] for item in chunk_response.data])
     
     return df, comp_df, embedded_urls
@@ -43,14 +44,12 @@ def calculate_progress(df, embedded_urls):
     return total_docs, summarized_docs, summary_pct, embedded_docs, embed_pct
 
 def get_token_stats():
-    """DB에서 토큰 사용량을 집계하여 월간/누적 비용 계산"""
     try:
         res = supabase.table("token_usage").select("*").execute()
         df = pd.DataFrame(res.data)
         if df.empty: return 0, 0, 0
         in_t = int(df['input_tokens'].sum())
         out_t = int(df['output_tokens'].sum())
-        # 비용 추정: 1.5 Pro 요율 기준 ($1.25 / 1M input, $5.00 / 1M output)
         cost = (in_t / 1000000 * 1.25) + (out_t / 1000000 * 5.00)
         return in_t, out_t, cost
     except Exception:
@@ -63,7 +62,6 @@ def save_chat_to_db(role, content):
         pass
 
 def delete_old_chat_records():
-    """7일이 경과한 채팅 기록 삭제"""
     try:
         seven_days_ago = (datetime.utcnow() - timedelta(days=7)).isoformat()
         supabase.table("chat_history").delete().lt("created_at", seven_days_ago).execute()
@@ -95,20 +93,15 @@ def convert_to_kst(time_str):
         return str(time_str).replace("T", " ")[:16]
 
 def clean_html_tags(text):
-    """결과물 내 불필요한 HTML 태그 및 깨진 테이블 요소 보정"""
     if not text: return ""
     text = re.sub(r'<br\s*/?>', '\n', text)
     text = text.replace('**\n**', '**\n\n**')
     return text
     
 def get_agency_flag(agency):
-    """규제기관 문자열에 매칭되는 국기 이모지 반환 (안전장치 추가)"""
     if not isinstance(agency, str):
         return "🏳️"
-    
-    # DB에 저장된 텍스트의 공백 제거 및 대문자 변환을 통해 매칭 오류 원천 차단
     clean_agency = agency.strip().upper()
-    
     flags = {
         "FDA": "🇺🇸",
         "EMA": "🇪🇺",
@@ -122,21 +115,19 @@ def get_agency_flag(agency):
 def main():
     st.set_page_config(page_title="RA 가이드라인 대시보드", layout="wide")
     
-    # 가독성 개선을 위한 전역 CSS 주입
     st.markdown("""
     <style>
-        /* 마크다운 테이블 가독성 향상 */
         .stMarkdown table {
             width: 100%;
             border-collapse: collapse;
             font-size: 14px;
-            table-layout: fixed; /* 열 너비를 균등하게 또는 컨텐츠에 맞게 조정 */
+            table-layout: fixed;
         }
         .stMarkdown th, .stMarkdown td {
             border: 1px solid #ddd !important;
             padding: 12px !important;
             text-align: left !important;
-            word-wrap: break-word !important; /* 긴 텍스트 자동 줄바꿈 */
+            word-wrap: break-word !important;
             white-space: normal !important;
         }
         .stMarkdown th {
@@ -144,7 +135,6 @@ def main():
             font-weight: 600 !important;
             color: #333 !important;
         }
-        /* 리스트(불릿) 여백 조정 */
         .stMarkdown li {
             margin-bottom: 8px;
             line-height: 1.6;
@@ -164,7 +154,6 @@ def main():
         st.warning("데이터베이스에 수집된 가이드라인 데이터가 없습니다.")
         return
 
-    # 사이드바: 처리 현황
     st.sidebar.header("📊 데이터 처리 현황")
     total, sum_cnt, sum_pct, emb_cnt, emb_pct = calculate_progress(df, embedded_urls)
     st.sidebar.metric("전체 수집 문서", f"{total} 건")
@@ -172,20 +161,17 @@ def main():
     st.sidebar.progress(emb_pct / 100, text=f"AI 임베딩: {emb_pct}% ({emb_cnt}/{total})")
     st.sidebar.divider()
     
-    # 사이드바: 필터 옵션 (사이드바 메뉴에도 국기 표시 기능 추가)
-    st.sidebar.header("🔍 필터 옵션")
     agencies = df['agency'].dropna().unique().tolist()
     selected_agencies = st.sidebar.multiselect(
         "규제기관 (Agency)", 
         options=agencies, 
         default=agencies,
-        format_func=lambda x: f"{get_agency_flag(x)} {x}"  # 드롭다운 목록에 국기 적용
+        format_func=lambda x: f"{get_agency_flag(x)} {x}"
     )
     categories = df['category'].dropna().unique().tolist()
     selected_categories = st.sidebar.multiselect("키워드/카테고리", options=categories, default=categories)
     st.sidebar.divider()
 
-    # 사이드바: 토큰 소모량
     st.sidebar.header("💰 API 토큰 소모 현황")
     in_tokens, out_tokens, est_cost = get_token_stats()
     st.sidebar.write(f"- 누적 입력 토큰: **{in_tokens:,}**")
@@ -193,7 +179,6 @@ def main():
     st.sidebar.write(f"- 예상 월간 비용: **${est_cost:.2f}**")
     st.sidebar.caption("※ 현재 API 모델(Flash) 유지 중. 향후 유료 요금제(Pro) 전환 시 실 과금액 추정치입니다.")
 
-    # 탭 순서 변경 및 이름 수정 (RAG Q&A -> Guideline Chatbot)
     tab_search, tab_old_new, tab_multi, tab_chat, tab_history, tab_upload = st.tabs([
         "📄 문서 검색", 
         "🔄 신/구버전 비교", 
@@ -214,12 +199,21 @@ def main():
     filtered_df['has_embedding'] = filtered_df['url'].isin(embedded_urls)
     
     def get_status_score(row):
+        # 정상 처리 완료
         if row['has_summary'] and row['has_embedding']: return 4
         if row['has_summary'] and not row['has_embedding']: return 3
-        if not row['has_summary'] and row['has_embedding']: return 2
+        # 논리적 데이터 불일치 (요약 실패했으나 벡터 DB에 값이 존재)
+        if not row['has_summary'] and row['has_embedding']: return -1
+        # 대기 중 또는 영구 추출 실패
         return 1
         
     filtered_df['status_score'] = filtered_df.apply(get_status_score, axis=1)
+
+    # 사이드바 데이터 불일치 경고 로직 추가
+    error_count = len(filtered_df[filtered_df['status_score'] == -1])
+    if error_count > 0:
+        st.sidebar.divider()
+        st.sidebar.error(f"⚠️ 데이터 불일치 문서: {error_count}건\n\n(요약은 없으나 벡터 DB에 데이터가 존재합니다. '문서 검색' 탭에서 확인하십시오.)")
 
     # --- TAB 1: 가이드라인 검색 ---
     with tab_search:
@@ -231,12 +225,20 @@ def main():
         st.subheader(f"검색 결과: {len(tab1_df)} 건")
         
         for index, row in tab1_df.iterrows():
-            if row['status_score'] == 4: status_icon = "🟢 [완료]"
-            elif row['status_score'] == 3: status_icon = "🟡 [요약 완료]"
-            elif row['status_score'] == 2: status_icon = "🟡 [임베딩 완료]"
-            else: status_icon = "⏳ [대기중]"
+            # 상태에 따른 명확한 아이콘 분류
+            if row['status_score'] == 4: 
+                status_icon = "🟢 [완료]"
+            elif row['status_score'] == 3: 
+                status_icon = "🟡 [요약 완료]"
+            elif row['status_score'] == -1: 
+                status_icon = "🔴 [오류: 데이터 불일치]"
+            else:
+                if isinstance(row.get('ai_summary'), str) and "추출 불가" in row['ai_summary']:
+                    status_icon = "⚪ [추출 실패]"
+                else:
+                    status_icon = "⏳ [대기중]"
                 
-            agency_flag = get_agency_flag(row['agency']) # 국기 가져오기
+            agency_flag = get_agency_flag(row['agency']) 
             
             with st.expander(f"{status_icon} {row['title']} ({agency_flag} {row['agency']})"):
                 col1, col2 = st.columns([3, 1])
@@ -246,9 +248,17 @@ def main():
                     st.markdown(f"[🔗 원본 문서 열기]({row['url']})")
                 st.divider()
                 st.markdown("#### 💡 AI 핵심 요약")
-                if row['has_summary']: st.write(row['ai_summary'])
-                else: st.info("AI 요약 대기 중이거나 추출 불가 문서입니다.")
-                if not row['has_embedding']: st.warning("⚠️ RAG 검색용 벡터 DB에 임베딩되지 않은 문서입니다.")
+                if row['has_summary']: 
+                    st.write(row['ai_summary'])
+                elif isinstance(row.get('ai_summary'), str) and "추출 불가" in row['ai_summary']: 
+                    st.error(row['ai_summary'])
+                else:
+                    st.info("AI 요약 대기 중입니다.")
+                
+                if row['status_score'] == -1:
+                    st.warning("⚠️ 요약 텍스트가 없음에도 벡터 DB에 임베딩 데이터가 존재합니다. 과거의 잘못된 청크이거나 구조적 오류일 수 있습니다.")
+                elif not row['has_embedding']: 
+                    st.warning("⚠️ RAG 검색용 벡터 DB에 임베딩되지 않은 문서입니다.")
 
     # --- TAB 2: 신/구버전 자동 비교 이력 ---
     with tab_old_new:
@@ -266,13 +276,12 @@ def main():
     # --- TAB 3: 다중 문서 수동 비교 ---
     with tab_multi:
         st.markdown("#### ⚖️ 다중 문서 수동 비교 분석")
-        # 임베딩 완료 문서만 필터링
-        embedded_only_df = filtered_df[filtered_df['has_embedding'] == True].copy()
+        embedded_only_df = filtered_df[filtered_df['status_score'] == 4].copy() # 정상 완료된 문서만 필터링
         
         if embedded_only_df.empty:
-            st.info("임베딩이 완료된 문서가 없습니다.")
+            st.info("임베딩 및 요약이 정상적으로 완료된 문서가 없습니다.")
         else:
-            embedded_only_df['상태'] = "🟢 임베딩 완료"
+            embedded_only_df['상태'] = "🟢 준비 완료"
             df_for_selection = embedded_only_df[['상태', 'title', 'agency', 'category', 'url']].copy()
             df_for_selection['agency'] = df_for_selection['agency'].apply(lambda x: f"{get_agency_flag(x)} {x}")
             df_for_selection.insert(0, "비교 선택", False)
@@ -294,7 +303,6 @@ def main():
                             if "오류" in comparison_result:
                                 st.error("문서 비교 분석 중 오류가 발생했습니다. API 토큰 한도를 초과했을 수 있습니다.")
                             else:
-                                # 가독성 개선: <br> 태그 처리
                                 cleaned_result = clean_html_tags(comparison_result)
                                 save_analysis_to_db(selected_docs_info, cleaned_result)
                                 st.divider()
@@ -343,8 +351,6 @@ def main():
     # --- TAB 5: 사용 이력 및 다운로드 ---
     with tab_history:
         st.markdown("#### 🗂️ Chatbot 및 분석 전체 이력")
-        
-        # 7일 이전 데이터베이스 기록 삭제 실행
         delete_old_chat_records()
 
         try:
@@ -370,7 +376,6 @@ def main():
         with col1:
             st.subheader("💬 Guideline Chatbot 기록 (최근 7일)")
             if chat_data:
-                # 데이터를 날짜별로 그룹화
                 daily_chats = defaultdict(list)
                 for chat in chat_data:
                     chat_time_kst = convert_to_kst(chat.get('created_at'))
@@ -430,7 +435,6 @@ def main():
                     md_analysis = f"# 다중 문서 수동 비교 분석 리포트\n\n<div class='date-stamp'>분석 일시: {raw_time}</div>\n\n"
                     if doc_titles_list: md_analysis += f"**[분석 대상 문서]**<br>" + "<br>".join(doc_titles_list) + "\n\n<hr>\n\n"
                     
-                    # HTML 변환 전 저장된 결과의 가독성을 위해 치환 처리 적용
                     cleaned_db_result = clean_html_tags(r.get('comparison_result', ''))
                     md_analysis += f"{cleaned_db_result}"
                     
@@ -472,11 +476,9 @@ def main():
                     file_name = uploaded_file.name
                     file_bytes = uploaded_file.read()
                     try:
-                        # Storage에 파일 업로드
                         supabase.storage.from_("guidelines_pdf").upload(file_name, file_bytes)
                         file_url = supabase.storage.from_("guidelines_pdf").get_public_url(file_name)
                         
-                        # DB에 기록 (ai_summary는 null로 두어 analyzer.py가 후속 처리하도록 함)
                         supabase.table("guidelines").insert({
                             "title": file_name,
                             "agency": agency_input,
