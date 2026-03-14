@@ -21,6 +21,8 @@ SCRAPER_API_KEY = os.getenv("SCRAPER_API_KEY")
 supabase: Client = create_client(SUPABASE_URL, SUPABASE_KEY)
 client = genai.Client(api_key=GEMINI_API_KEY)
 
+EMBEDDING_MODEL = "text-embedding-004"
+
 def extract_text_with_ocr(pdf_bytes):
     try:
         images = convert_from_bytes(pdf_bytes)
@@ -30,7 +32,6 @@ def extract_text_with_ocr(pdf_bytes):
         return "FAILED"
 
 def fetch_html_with_scraperapi(url):
-    """ScraperAPI 호출 및 3회 재시도 로직 적용"""
     if not SCRAPER_API_KEY: return None
     payload = {'api_key': SCRAPER_API_KEY, 'url': url, 'render': 'true'}
     for _ in range(3):
@@ -43,7 +44,6 @@ def fetch_html_with_scraperapi(url):
     return None
 
 def fetch_binary_with_scraperapi(url):
-    """PDF 우회 다운로드 및 3회 재시도 로직 적용"""
     if not SCRAPER_API_KEY: return None
     payload = {'api_key': SCRAPER_API_KEY, 'url': url}
     for _ in range(3):
@@ -117,10 +117,12 @@ def process_embeddings():
         print("모든 문서의 정상 임베딩이 완료되었습니다.")
         return
 
-    for target_doc in unprocessed_docs[:3]:
+    print(f"총 {len(unprocessed_docs)}건의 미완료/실패 문서 임베딩을 일괄 진행합니다.")
+
+    # [:3] 제한 제거: 횟수 제한 없이 전체 문서 순차 처리
+    for target_doc in unprocessed_docs:
         print(f"\nProcessing / Retrying: {target_doc['title']}")
         
-        # 시작 전 기존 찌꺼기 삭제
         supabase.table("document_chunks").delete().eq("url", target_doc["url"]).execute()
         
         text = extract_text(target_doc['url'])
@@ -136,7 +138,7 @@ def process_embeddings():
         for i, chunk in enumerate(chunks):
             try:
                 response = client.models.embed_content(
-                    model='gemini-embedding-001',
+                    model=EMBEDDING_MODEL,
                     contents=chunk
                 )
                 embedding_vector = response.embeddings[0].values
@@ -149,14 +151,13 @@ def process_embeddings():
                 }).execute()
                 
                 print(f"   - Chunk {i+1}/{len(chunks)} 저장 완료")
-                time.sleep(5)
+                time.sleep(1) # 유료 플랜이므로 대기 시간 단축
                 
             except Exception as e:
                 print(f"   - Chunk {i+1} 임베딩 실패: {e}")
                 success = False
                 break 
 
-        # [추가됨] 중간 실패 시 불완전한 상태 방지를 위한 롤백
         if not success:
             print(" -> 임베딩 오류 발생. 불완전한 청크 삭제(롤백) 처리.")
             supabase.table("document_chunks").delete().eq("url", target_doc["url"]).execute()
