@@ -39,6 +39,20 @@ def calculate_progress(df, embedded_urls):
     embed_pct = int((embedded_docs / total_docs) * 100) if total_docs > 0 else 0
     return total_docs, summarized_docs, summary_pct, embedded_docs, embed_pct
 
+def get_token_stats():
+    """DB에서 토큰 사용량을 집계하여 월간/누적 비용 계산"""
+    try:
+        res = supabase.table("token_usage").select("*").execute()
+        df = pd.DataFrame(res.data)
+        if df.empty: return 0, 0, 0
+        in_t = int(df['input_tokens'].sum())
+        out_t = int(df['output_tokens'].sum())
+        # 비용 추정: 1.5 Pro 요율 기준 ($1.25 / 1M input, $5.00 / 1M output)
+        cost = (in_t / 1000000 * 1.25) + (out_t / 1000000 * 5.00)
+        return in_t, out_t, cost
+    except Exception:
+        return 0, 0, 0
+
 def save_chat_to_db(role, content):
     try:
         supabase.table("chat_history").insert({"role": role, "content": content}).execute()
@@ -57,7 +71,6 @@ def delete_analysis_record(record_id):
     except Exception:
         st.error("기록 삭제 중 오류가 발생했습니다.")
 
-# 시간 변환 도우미 함수 (UTC -> KST 변환 및 'T' 제거)
 def convert_to_kst(time_str):
     if pd.isna(time_str) or str(time_str).strip() == "" or str(time_str).lower() == 'nan':
         return "정보 없음"
@@ -77,13 +90,14 @@ def main():
     try:
         df, comp_df, embedded_urls = load_data()
     except Exception:
-        st.error("데이터베이스에서 가이드라인 정보를 불러오는 데 실패했습니다. 네트워크 상태를 확인하거나 잠시 후 다시 시도해 주십시오.")
+        st.error("데이터베이스에서 가이드라인 정보를 불러오는 데 실패했습니다. 잠시 후 다시 시도해 주십시오.")
         return
     
     if df.empty:
         st.warning("데이터베이스에 수집된 가이드라인 데이터가 없습니다.")
         return
 
+    # 사이드바: 처리 현황
     st.sidebar.header("📊 데이터 처리 현황")
     total, sum_cnt, sum_pct, emb_cnt, emb_pct = calculate_progress(df, embedded_urls)
     st.sidebar.metric("전체 수집 문서", f"{total} 건")
@@ -91,14 +105,24 @@ def main():
     st.sidebar.progress(emb_pct / 100, text=f"AI 임베딩: {emb_pct}% ({emb_cnt}/{total})")
     st.sidebar.divider()
     
+    # 사이드바: 필터 옵션
     st.sidebar.header("🔍 필터 옵션")
     agencies = df['agency'].dropna().unique().tolist()
     selected_agencies = st.sidebar.multiselect("규제기관 (Agency)", options=agencies, default=agencies)
     categories = df['category'].dropna().unique().tolist()
     selected_categories = st.sidebar.multiselect("키워드/카테고리", options=categories, default=categories)
+    st.sidebar.divider()
 
-    tab1, tab2, tab3, tab4, tab5 = st.tabs([
-        "📄 문서 검색", "💬 RAG Q&A", "⚖️ 다중 문서 비교", "🔄 신/구버전 비교", "🗂️ 사용 이력 및 다운로드"
+    # 사이드바: 토큰 소모량
+    st.sidebar.header("💰 API 토큰 소모 현황")
+    in_tokens, out_tokens, est_cost = get_token_stats()
+    st.sidebar.write(f"- 누적 입력 토큰: **{in_tokens:,}**")
+    st.sidebar.write(f"- 누적 출력 토큰: **{out_tokens:,}**")
+    st.sidebar.write(f"- 예상 월간 비용: **${est_cost:.2f}**")
+    st.sidebar.caption("※ 현재 API 모델(Flash) 유지 중. 향후 유료 요금제(Pro) 전환 시 실 과금액 추정치입니다.")
+
+    tab1, tab2, tab3, tab4, tab5, tab6 = st.tabs([
+        "📄 문서 검색", "💬 RAG Q&A", "⚖️ 다중 문서 비교", "🔄 신/구버전 비교", "🗂️ 사용 이력", "📤 PDF 수동 업로드"
     ])
 
     filtered_df = df[(df['agency'].isin(selected_agencies)) & (df['category'].isin(selected_categories))]
@@ -186,17 +210,19 @@ def main():
     # --- TAB 3: 다중 문서 수동 비교 ---
     with tab3:
         st.markdown("#### ⚖️ 다중 문서 수동 비교 분석")
+        # 임베딩 완료 문서만 필터링
         embedded_only_df = filtered_df[filtered_df['has_embedding'] == True].copy()
         
         if embedded_only_df.empty:
             st.info("임베딩이 완료된 문서가 없습니다.")
         else:
-            df_for_selection = embedded_only_df[['title', 'agency', 'category', 'url']].copy()
+            embedded_only_df['상태'] = "🟢 임베딩 완료"
+            df_for_selection = embedded_only_df[['상태', 'title', 'agency', 'category', 'url']].copy()
             df_for_selection.insert(0, "비교 선택", False)
             edited_df = st.data_editor(
                 df_for_selection, hide_index=True,
                 column_config={"비교 선택": st.column_config.CheckboxColumn("비교 선택", default=False), "url": None},
-                disabled=["title", "agency", "category"], use_container_width=True
+                disabled=["상태", "title", "agency", "category"], use_container_width=True
             )
             
             selected_rows = edited_df[edited_df["비교 선택"]]
@@ -209,14 +235,14 @@ def main():
                         try:
                             comparison_result = rag_engine.compare_multiple_documents(selected_docs_info)
                             if "오류" in comparison_result:
-                                st.error("문서 비교 분석 중 오류가 발생했습니다. 선택한 문서의 양이 너무 많아 API 토큰 한도를 초과했을 수 있습니다.")
+                                st.error("문서 비교 분석 중 오류가 발생했습니다. API 토큰 한도를 초과했을 수 있습니다.")
                             else:
                                 save_analysis_to_db(selected_docs_info, comparison_result)
                                 st.divider()
                                 st.markdown("#### 📊 분석 결과")
                                 st.markdown(comparison_result)
                         except Exception:
-                            st.error("분석 서버와의 통신에 실패했습니다. 잠시 후 다시 시도해 주십시오.")
+                            st.error("분석 서버와의 통신에 실패했습니다.")
 
     # --- TAB 4: 신/구버전 자동 비교 이력 ---
     with tab4:
@@ -249,10 +275,6 @@ def main():
             table { border-collapse: collapse; width: 100%; margin: 20px 0; font-size: 0.95em; }
             th, td { border: 1px solid #ddd; padding: 12px; text-align: left; vertical-align: top; }
             th { background-color: #f0f2f6; font-weight: bold; color: #31333F; }
-            tr:nth-child(even) { background-color: #fafafa; }
-            blockquote { border-left: 4px solid #0052cc; margin: 0; padding-left: 15px; color: #555; background-color: #f9f9f9; padding: 10px; }
-            hr { border: 0; border-top: 1px solid #eee; margin: 30px 0; }
-            .date-stamp { color: #888; font-size: 0.9em; margin-bottom: 20px; }
         </style>
         """
 
@@ -272,7 +294,7 @@ def main():
                     final_html_chat = f"<!DOCTYPE html><html><head><meta charset='utf-8'>{css_style}</head><body>{html_chat_content}</body></html>"
                     st.download_button(label="전체 채팅 기록 다운로드 (.html)", data=final_html_chat, file_name="rag_chat_history.html", mime="text/html")
                 except Exception:
-                    st.warning("파일 다운로드 준비 중 오류가 발생했습니다.")
+                    pass
                 
                 with st.container(height=600):
                     for chat in chat_data:
@@ -288,13 +310,12 @@ def main():
             st.subheader("⚖️ 수동 비교 분석 기록")
             if analysis_data:
                 for r in analysis_data:
-                    doc_titles_list = []
                     file_title_prefix = "다중문서비교"
+                    doc_titles_list = []
                     try:
                         docs = json.loads(r['docs_info'])
                         doc_titles_list = [f"- {d.get('title', 'Unknown')} ({d.get('agency', 'N/A')})" for d in docs]
-                        agencies = [d.get('agency', 'NA') for d in docs]
-                        file_title_prefix = "_vs_".join(agencies) + "_비교"
+                        file_title_prefix = "_vs_".join([d.get('agency', 'NA') for d in docs]) + "_비교"
                     except:
                         pass
                     
@@ -302,37 +323,68 @@ def main():
                     safe_time = raw_time.replace(":", "").replace("-", "").replace(" ", "_")
                     file_name = f"{file_title_prefix}_{safe_time}.html"
 
-                    md_analysis = f"# 다중 문서 수동 비교 분석 리포트\n\n"
-                    md_analysis += f"<div class='date-stamp'>분석 일시: {raw_time}</div>\n\n"
-                    if doc_titles_list:
-                        md_analysis += f"**[분석 대상 문서]**<br>" + "<br>".join(doc_titles_list) + "\n\n<hr>\n\n"
+                    md_analysis = f"# 다중 문서 수동 비교 분석 리포트\n\n<div class='date-stamp'>분석 일시: {raw_time}</div>\n\n"
+                    if doc_titles_list: md_analysis += f"**[분석 대상 문서]**<br>" + "<br>".join(doc_titles_list) + "\n\n<hr>\n\n"
                     md_analysis += f"{r['comparison_result']}"
                     
                     try:
                         html_analysis_content = markdown.markdown(md_analysis, extensions=['tables'])
                         final_html_analysis = f"<!DOCTYPE html><html><head><meta charset='utf-8'>{css_style}</head><body>{html_analysis_content}</body></html>"
-                    except Exception:
+                    except:
                         final_html_analysis = "HTML 변환 오류 발생"
 
                     with st.expander(f"분석 일시: {raw_time} | {file_title_prefix}"):
                         btn_col1, btn_col2 = st.columns([1, 1])
                         with btn_col1:
-                            st.download_button(
-                                label="📥 HTML 다운로드", 
-                                data=final_html_analysis, 
-                                file_name=file_name, 
-                                mime="text/html",
-                                key=f"dl_btn_{r['id']}"
-                            )
+                            st.download_button(label="📥 HTML 다운로드", data=final_html_analysis, file_name=file_name, mime="text/html", key=f"dl_btn_{r['id']}")
                         with btn_col2:
                             if st.button("🗑️ 기록 삭제", key=f"del_btn_{r['id']}"):
                                 delete_analysis_record(r['id'])
                                 st.rerun()
-                                
                         st.divider()
                         st.markdown(r['comparison_result'])
             else:
                 st.info("저장된 비교 분석 기록이 없습니다.")
+
+    # --- TAB 6: PDF 업로드 ---
+    with tab6:
+        st.markdown("#### 📤 로컬 PDF 가이드라인 업로드")
+        st.write("PC 환경의 가이드라인 문서를 직접 업로드하여 데이터베이스에 추가합니다.")
+        
+        col1, col2 = st.columns(2)
+        with col1:
+            agency_input = st.selectbox("발행 기관 (Agency)", ["FDA", "EMA", "ICH", "MFDS", "기타"])
+        with col2:
+            category_input = st.text_input("카테고리/키워드 (예: CMC, 임상, 비임상)")
+            
+        uploaded_file = st.file_uploader("PDF 파일 선택 (드래그 앤 드롭 가능)", type="pdf")
+        
+        if st.button("데이터베이스 추가 및 분석 대기열 등록", type="primary"):
+            if uploaded_file is not None and category_input:
+                with st.spinner("파일을 서버에 업로드하고 있습니다..."):
+                    file_name = uploaded_file.name
+                    file_bytes = uploaded_file.read()
+                    try:
+                        # Storage에 파일 업로드
+                        supabase.storage.from_("guidelines_pdf").upload(file_name, file_bytes)
+                        file_url = supabase.storage.from_("guidelines_pdf").get_public_url(file_name)
+                        
+                        # DB에 기록 (ai_summary는 null로 두어 analyzer.py가 후속 처리하도록 함)
+                        supabase.table("guidelines").insert({
+                            "title": file_name,
+                            "agency": agency_input,
+                            "category": category_input,
+                            "url": file_url,
+                            "ai_summary": None 
+                        }).execute()
+                        st.success("데이터베이스 추가 성공! 백그라운드 시스템이 요약 및 임베딩을 순차적으로 진행합니다.")
+                    except Exception as e:
+                        if "Duplicate" in str(e):
+                            st.error("이미 동일한 이름의 파일이 스토리지에 존재합니다. 파일명을 변경 후 다시 시도하십시오.")
+                        else:
+                            st.error(f"업로드 에러: {e}")
+            else:
+                st.warning("PDF 파일을 첨부하고 카테고리를 입력해 주십시오.")
 
 if __name__ == "__main__":
     main()
