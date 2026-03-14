@@ -25,7 +25,8 @@ jobs:
       - name: 파이썬 패키지 설치
         run: |
           python -m pip install --upgrade pip
-          pip install requests PyMuPDF beautifulsoup4 pytesseract pdf2image supabase google-generativeai
+          # 기존의 직접 나열 방식 대신 requirements.txt를 사용하도록 수정
+          pip install -r requirements.txt
 
       - name: 요약 및 분석 스크립트 실행
         env:
