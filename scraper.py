@@ -57,7 +57,7 @@ def get_base_domain(url):
     parts = domain.split('.')
     return '.'.join(parts[-2:]) if len(parts) > 1 else domain
 
-def discover_guidelines(agency, start_url, keywords, current_depth=0, max_depth=2, visited=None, base_domain=None):
+def discover_guidelines(agency, start_url, keywords, current_depth=0, max_depth=2, visited=None, base_domain=None, parent_is_relevant=False):
     """페이지 내 링크를 탐색하여 가이드라인과 상세 지침을 재귀적으로 수집"""
     if visited is None:
         visited = set()
@@ -80,6 +80,10 @@ def discover_guidelines(agency, start_url, keywords, current_depth=0, max_depth=
 
     soup = BeautifulSoup(html, 'html.parser')
     found_guidelines = []
+
+    # 현재 방문 중인 페이지 자체가 키워드를 포함하고 있는지 확인 (관련성 상속 로직)
+    page_title = soup.title.string if soup.title else ""
+    current_page_is_relevant = parent_is_relevant or any(kw.lower() in page_title.lower() or kw.lower() in normalized_url.lower() for kw in keywords)
     
     for a_tag in soup.find_all("a", href=True):
         href = a_tag.get('href', '').strip()
@@ -89,10 +93,13 @@ def discover_guidelines(agency, start_url, keywords, current_depth=0, max_depth=
         title = a_tag.get_text(separator=' ', strip=True) 
         full_url = urljoin(start_url, href).split('#')[0]
         
-        is_doc = any(ext in full_url.lower() for ext in [".pdf", "download", "guidance-documents"])
+        is_doc = any(ext in full_url.lower() for ext in [".pdf", "download", "guidance-documents", "/file/"])
         is_relevant = any(kw.lower() in title.lower() or kw.lower() in full_url.lower() for kw in keywords)
 
-        if is_doc and is_relevant:
+        # 개별 링크에 키워드가 있거나, 부모 페이지가 이미 관련성이 높은 경우 True로 판정
+        link_is_relevant = is_relevant or current_page_is_relevant
+
+        if is_doc and link_is_relevant:
             found_guidelines.append({
                 "agency": agency,
                 "title": title if title else full_url.split('/')[-1],
@@ -107,7 +114,7 @@ def discover_guidelines(agency, start_url, keywords, current_depth=0, max_depth=
             link_domain = get_base_domain(full_url)
             if base_domain in link_domain:
                 found_guidelines.extend(discover_guidelines(
-                    agency, full_url, keywords, current_depth + 1, max_depth, visited, base_domain
+                    agency, full_url, keywords, current_depth + 1, max_depth, visited, base_domain, is_relevant
                 ))
 
     return found_guidelines
