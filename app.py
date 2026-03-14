@@ -95,7 +95,7 @@ def convert_to_kst(time_str):
         return str(time_str).replace("T", " ")[:16]
 
 def clean_html_tags(text):
-    """결과물 내 불필요한 HTML 태그(<br> 등)를 마크다운에 맞게 변환 및 제거하여 가독성 개선"""
+    """결과물 내 불필요한 HTML 태그 및 깨진 테이블 요소 보정"""
     if not text: return ""
     text = re.sub(r'<br\s*/?>', '\n', text)
     text = text.replace('**\n**', '**\n\n**')
@@ -103,6 +103,37 @@ def clean_html_tags(text):
 
 def main():
     st.set_page_config(page_title="RA 가이드라인 대시보드", layout="wide")
+    
+    # 가독성 개선을 위한 전역 CSS 주입
+    st.markdown("""
+    <style>
+        /* 마크다운 테이블 가독성 향상 */
+        .stMarkdown table {
+            width: 100%;
+            border-collapse: collapse;
+            font-size: 14px;
+            table-layout: fixed; /* 열 너비를 균등하게 또는 컨텐츠에 맞게 조정 */
+        }
+        .stMarkdown th, .stMarkdown td {
+            border: 1px solid #ddd !important;
+            padding: 12px !important;
+            text-align: left !important;
+            word-wrap: break-word !important; /* 긴 텍스트 자동 줄바꿈 */
+            white-space: normal !important;
+        }
+        .stMarkdown th {
+            background-color: #f4f6f8 !important;
+            font-weight: 600 !important;
+            color: #333 !important;
+        }
+        /* 리스트(불릿) 여백 조정 */
+        .stMarkdown li {
+            margin-bottom: 8px;
+            line-height: 1.6;
+        }
+    </style>
+    """, unsafe_allow_html=True)
+
     st.title("FDA & EMA 가이드라인 통합 검색 및 분석")
     
     try:
@@ -246,7 +277,7 @@ def main():
                         except Exception:
                             st.error("분석 서버와의 통신에 실패했습니다.")
 
-    # --- TAB 4: Guideline Chatbot (기존 RAG Q&A) ---
+    # --- TAB 4: Guideline Chatbot ---
     with tab_chat:
         st.markdown("#### 규제 가이드라인 AI 어시스턴트 (Guideline Chatbot)")
         if "messages" not in st.session_state: st.session_state.messages = []
