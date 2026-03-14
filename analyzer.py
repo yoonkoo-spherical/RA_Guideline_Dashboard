@@ -2,13 +2,13 @@ import os
 import smtplib
 from email.mime.text import MIMEText
 import requests
-import fitz  # PyMuPDF
+import fitz
 import json
 import pytesseract
 from pdf2image import convert_from_bytes
 from bs4 import BeautifulSoup
 from urllib.parse import urljoin
-import google.generativeai as genai
+from google import genai
 from supabase import create_client, Client
 
 # 1. 환경 변수 및 설정
@@ -20,44 +20,38 @@ SMTP_EMAIL = os.environ.get("SMTP_EMAIL")
 SMTP_PASSWORD = os.environ.get("SMTP_PASSWORD")
 
 supabase: Client = create_client(SUPABASE_URL, SUPABASE_KEY)
-genai.configure(api_key=GEMINI_API_KEY)
+client = genai.Client(api_key=GEMINI_API_KEY)
 
-# 최적의 가성비를 위해 Flash 모델 사용 (Pro 전환 시 모델명 변경)
 GENERATION_MODEL = "gemini-2.5-flash"
+EMBEDDING_MODEL = "gemini-embedding-001"
 
 def send_alert_email(subject, content):
-    """신/구버전 비교 결과 등 주요 변경점 감지 시 이메일 발송"""
     if not SMTP_EMAIL or not SMTP_PASSWORD:
-        print("이메일 환경변수가 설정되지 않아 알림을 생략합니다.")
         return
 
     msg = MIMEText(content)
     msg['Subject'] = subject
     msg['From'] = SMTP_EMAIL
-    msg['To'] = SMTP_EMAIL  # 본인에게 발송
+    msg['To'] = SMTP_EMAIL
 
     try:
         with smtplib.SMTP_SSL('smtp.gmail.com', 465) as server:
             server.login(SMTP_EMAIL, SMTP_PASSWORD)
             server.send_message(msg)
-        print(f"이메일 발송 성공: {subject}")
     except Exception as e:
         print(f"이메일 발송 실패: {e}")
 
 def extract_text_with_ocr(pdf_bytes):
-    """이미지형 PDF에서 OCR을 통해 텍스트 추출"""
     try:
         images = convert_from_bytes(pdf_bytes)
         text = ""
         for img in images:
-            # 영어와 한국어 동시 인식 (Ubuntu 환경에 tesseract-ocr-kor 설치 필요)
             text += pytesseract.image_to_string(img, lang='eng+kor')
         return text if text.strip() else "추출 불가: OCR 텍스트 인식 실패"
     except Exception as e:
         return f"추출 불가: OCR 처리 에러 ({e})"
 
 def extract_text_from_url(url):
-    """웹 페이지 접근, PDF 다운로드 및 텍스트 추출 (봇 차단 회피 적용)"""
     headers = {
         "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
         "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8"
@@ -67,27 +61,18 @@ def extract_text_from_url(url):
         if response.status_code != 200:
             return f"추출 불가: 접근 권한 에러 (HTTP {response.status_code})"
 
-        # 응답이 PDF인 경우
         if "application/pdf" in response.headers.get("Content-Type", "").lower() or url.lower().endswith(".pdf"):
             doc = fitz.open(stream=response.content, filetype="pdf")
             text = "".join(page.get_text() for page in doc)
             if len(text.strip()) < 50:
-                print(" -> 텍스트 레이어 없음. OCR 처리를 시도합니다.")
                 return extract_text_with_ocr(response.content)
             return text
 
-        # 응답이 HTML인 경우 PDF 링크 탐색
         soup = BeautifulSoup(response.text, 'html.parser')
-        pdf_links = []
-        for a in soup.find_all("a", href=True):
-            href = a['href'].lower()
-            if ".pdf" in href or "download" in href:
-                pdf_links.append(urljoin(url, a['href']))
+        pdf_links = [urljoin(url, a['href']) for a in soup.find_all("a", href=True) if ".pdf" in a['href'].lower() or "download" in a['href'].lower()]
 
         if pdf_links:
-            target_pdf = pdf_links[0]
-            print(f" -> HTML 내 PDF 링크 발견: {target_pdf}")
-            pdf_res = requests.get(target_pdf, headers=headers, timeout=30)
+            pdf_res = requests.get(pdf_links[0], headers=headers, timeout=30)
             if pdf_res.status_code == 200:
                 doc = fitz.open(stream=pdf_res.content, filetype="pdf")
                 text = "".join(page.get_text() for page in doc)
@@ -102,7 +87,6 @@ def extract_text_from_url(url):
         return f"추출 불가: 예외 발생 ({e})"
 
 def analyze_document(text):
-    """Gemini API를 활용하여 가이드라인 요약 및 식별자 추출"""
     prompt = f"""
     당신은 RA 전문가입니다. 다음 가이드라인 원문을 분석하여 JSON 형식으로만 응답하십시오.
     1. "summary": 핵심 규제 내용 요약 (한국어, 300자 이내)
@@ -111,39 +95,61 @@ def analyze_document(text):
     원문:
     {text[:20000]}
     """
-    model = genai.GenerativeModel(GENERATION_MODEL)
     try:
-        response = model.generate_content(prompt)
+        response = client.models.generate_content(model=GENERATION_MODEL, contents=prompt)
         result_text = response.text.replace('```json', '').replace('```', '').strip()
         return json.loads(result_text)
-    except Exception as e:
-        print(f"LLM 분석 오류: {e}")
+    except Exception:
         return {"summary": "요약 실패: LLM 분석 에러", "ref_number": "N/A"}
 
 def compare_documents(old_text, new_text):
-    """신/구버전 문서 내용 대조 및 변경점 추출"""
     prompt = f"""
-    당신은 규제 문서 비교 전문가입니다. 구버전과 신버전 가이드라인의 주요 변경점을 분석하여 한국어로 요약하십시오.
+    구버전과 신버전 가이드라인의 주요 변경점을 분석하여 한국어로 요약하십시오.
     
-    [구버전 핵심 내용 일부]
+    [구버전 핵심 내용]
     {old_text[:15000]}
 
-    [신버전 핵심 내용 일부]
+    [신버전 핵심 내용]
     {new_text[:15000]}
     """
-    model = genai.GenerativeModel(GENERATION_MODEL)
     try:
-        response = model.generate_content(prompt)
+        response = client.models.generate_content(model=GENERATION_MODEL, contents=prompt)
         return response.text
     except Exception as e:
         return f"비교 분석 실패: {e}"
 
-def process_unsummarized_docs():
-    """메인 실행 로직"""
-    print("문서 요약 및 분석 작업을 시작합니다.")
+def embed_and_store_chunks(url, text):
+    """추출된 텍스트를 분할하여 벡터 데이터베이스에 저장"""
+    if len(text.strip()) < 50:
+        return False
+        
+    # 동일 URL에 대한 기존 임베딩 삭제 (재처리 시 중복 방지)
+    supabase.table("document_chunks").delete().eq("url", url).execute()
     
-    # ai_summary가 null이거나 '추출 불가' 상태인 문서를 20개 가져옴 (PostgREST 문법)
-    response = supabase.table("guidelines").select("*").or_("ai_summary.is.null,ai_summary.ilike.*추출 불가*").limit(20).execute()
+    chunk_size = 1000
+    chunks = [text[i:i+chunk_size] for i in range(0, len(text), chunk_size)]
+    
+    for index, chunk in enumerate(chunks):
+        try:
+            response = client.models.embed_content(model=EMBEDDING_MODEL, contents=chunk)
+            embedding_vector = response.embeddings[0].values
+            
+            supabase.table("document_chunks").insert({
+                "url": url,
+                "chunk_index": index,
+                "content": chunk,
+                "embedding": embedding_vector
+            }).execute()
+        except Exception as e:
+            print(f" -> Chunk {index} 임베딩 에러: {e}")
+            return False
+    return True
+
+def process_unsummarized_docs():
+    print("통합 문서 분석 및 임베딩 파이프라인을 시작합니다.")
+    
+    # 처리 대상: 요약이 없거나, 추출 실패 기록이 있는 문서 (최대 10개 제한)
+    response = supabase.table("guidelines").select("*").or_("ai_summary.is.null,ai_summary.ilike.*추출 불가*").limit(10).execute()
     docs = response.data
     
     if not docs:
@@ -154,45 +160,43 @@ def process_unsummarized_docs():
         doc_url = doc['url']
         print(f"\n처리 중: {doc['title']} ({doc_url})")
         
-        # 1. 텍스트 추출
+        # 1. 텍스트 단일 추출 (비용/시간 절감의 핵심)
         text = extract_text_from_url(doc_url)
         
-        # 추출 실패 시 상태 업데이트 후 다음 문서로 넘어감
         if "추출 불가" in text:
             print(f" -> {text}")
             supabase.table("guidelines").update({"ai_summary": text}).eq("url", doc_url).execute()
             continue
             
-        # 2. 요약 및 분석
+        # 2. 요약 및 식별자 추출
         analysis_result = analyze_document(text)
         summary = analysis_result.get("summary", "N/A")
         ref_num = analysis_result.get("ref_number", "N/A")
-        print(f" -> 식별자: {ref_num}")
+        print(f" -> AI 요약 및 식별자({ref_num}) 추출 완료")
         
-        # 3. 버전 비교 및 이메일 발송 로직
+        # 3. 신/구버전 자동 비교
         if ref_num != "N/A" and doc.get('ref_number') != ref_num:
-            # 동일한 식별자를 가지되 URL이 다른 기존 문서가 있는지 확인
             existing_docs = supabase.table("guidelines").select("url").eq("ref_number", ref_num).neq("url", doc_url).execute().data
-            
             if existing_docs:
-                print(" -> 🔄 기존 버전 발견. 비교 분석을 시작합니다.")
                 old_url = existing_docs[0]['url']
                 old_text = extract_text_from_url(old_url)
-                
                 if "추출 불가" not in old_text:
                     comparison_text = compare_documents(old_text, text)
-                    # 데이터베이스 기록
                     supabase.table("version_comparisons").insert({
-                        "ref_number": ref_num,
-                        "old_url": old_url,
-                        "new_url": doc_url,
-                        "comparison_text": comparison_text
+                        "ref_number": ref_num, "old_url": old_url, "new_url": doc_url, "comparison_text": comparison_text
                     }).execute()
-                    
-                    # 이메일 발송
                     send_alert_email(f"[RA 시스템] 가이드라인 업데이트 감지: {ref_num}", comparison_text)
+                    print(" -> 버전 비교 완료 및 알림 이메일 발송")
                 
-        # 4. DB 최종 업데이트
+        # 4. 임베딩 및 DB 적재
+        is_embedded = embed_and_store_chunks(doc_url, text)
+        if is_embedded:
+            print(" -> 벡터 임베딩 및 DB 적재 완료")
+        else:
+            print(" -> 벡터 임베딩 실패")
+            summary = "요약 성공하였으나 임베딩 중단됨"
+
+        # 5. 상태 최종 업데이트
         supabase.table("guidelines").update({
             "ai_summary": summary,
             "ref_number": ref_num
