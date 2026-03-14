@@ -100,7 +100,19 @@ def clean_html_tags(text):
     text = re.sub(r'<br\s*/?>', '\n', text)
     text = text.replace('**\n**', '**\n\n**')
     return text
-
+    
+def get_agency_flag(agency):
+    """규제기관 문자열에 매칭되는 국기 이모지 반환"""
+    flags = {
+        "FDA": "🇺🇸",
+        "EMA": "🇪🇺",
+        "MHRA": "🇬🇧",
+        "Health Canada": "🇨🇦",
+        "ICH": "🌐",
+        "MFDS": "🇰🇷"
+    }
+    return flags.get(agency, "🏳️") # 목록에 없으면 기본 하얀 깃발 반환
+    
 def main():
     st.set_page_config(page_title="RA 가이드라인 대시보드", layout="wide")
     
@@ -212,12 +224,14 @@ def main():
             elif row['status_score'] == 3: status_icon = "🟡 [요약 완료]"
             elif row['status_score'] == 2: status_icon = "🟡 [임베딩 완료]"
             else: status_icon = "⏳ [대기중]"
-
-            with st.expander(f"{status_icon} {row['title']} ({row['agency']})"):
+                
+            agency_flag = get_agency_flag(row['agency']) # 국기 가져오기
+            
+            with st.expander(f"{status_icon} {row['title']} ({agency_flag} {row['agency']})"):
                 col1, col2 = st.columns([3, 1])
                 with col1:
                     db_added_date = convert_to_kst(row.get('created_at'))
-                    st.write(f"**기관:** {row['agency']} | **식별자:** {row.get('ref_number', 'N/A')} | **분류:** {row['category']} | **DB 추가일:** {db_added_date}")
+                    st.write(f"**기관:** {agency_flag} {row['agency']} | **식별자:** {row.get('ref_number', 'N/A')} | **분류:** {row['category']} | **DB 추가일:** {db_added_date}")
                     st.markdown(f"[🔗 원본 문서 열기]({row['url']})")
                 st.divider()
                 st.markdown("#### 💡 AI 핵심 요약")
@@ -249,6 +263,7 @@ def main():
         else:
             embedded_only_df['상태'] = "🟢 임베딩 완료"
             df_for_selection = embedded_only_df[['상태', 'title', 'agency', 'category', 'url']].copy()
+            df_for_selection['agency'] = df_for_selection['agency'].apply(lambda x: f"{get_agency_flag(x)} {x}")
             df_for_selection.insert(0, "비교 선택", False)
             edited_df = st.data_editor(
                 df_for_selection, hide_index=True,
