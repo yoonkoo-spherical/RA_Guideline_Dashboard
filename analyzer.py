@@ -27,7 +27,7 @@ client = genai.Client(api_key=GEMINI_API_KEY)
 # 모델 이원화 적용
 GENERATION_MODEL = "gemini-2.5-flash"      # 단순 요약 및 추출
 REASONING_MODEL = "gemini-2.5-pro"         # 심층 비교 및 추론
-EMBEDDING_MODEL = "text-embedding-004"     # 최신 임베딩 모델
+EMBEDDING_MODEL = "gemini-embedding-001"     # 최신 임베딩 모델
 
 def send_alert_email(subject, content):
     if not SMTP_EMAIL or not SMTP_PASSWORD:
