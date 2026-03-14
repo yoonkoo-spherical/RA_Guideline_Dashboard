@@ -1,13 +1,12 @@
 import os
-import streamlit as st
 from google import genai
 from supabase import create_client, Client
 from dotenv import load_dotenv
 
 try:
-    SUPABASE_URL = st.secrets["SUPABASE_URL"]
-    SUPABASE_KEY = st.secrets["SUPABASE_KEY"]
-    GEMINI_API_KEY = st.secrets["GEMINI_API_KEY"]
+    SUPABASE_URL = os.environ.get("SUPABASE_URL") or st.secrets["SUPABASE_URL"]
+    SUPABASE_KEY = os.environ.get("SUPABASE_KEY") or st.secrets["SUPABASE_KEY"]
+    GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY") or st.secrets["GEMINI_API_KEY"]
 except (FileNotFoundError, KeyError, Exception):
     load_dotenv()
     SUPABASE_URL = os.getenv("SUPABASE_URL")
@@ -17,10 +16,21 @@ except (FileNotFoundError, KeyError, Exception):
 supabase: Client = create_client(SUPABASE_URL, SUPABASE_KEY)
 client = genai.Client(api_key=GEMINI_API_KEY)
 
-# 지능형 라우팅: 의도 파악은 가벼운 모델, 실제 전문가 답변 생성은 상위 모델(1.5 Pro) 사용
+# 지능형 라우팅 모델 설정
 ROUTING_MODEL = 'gemini-2.5-flash-lite' 
 GENERATION_MODEL = 'gemini-2.5-flash' 
 EMBEDDING_MODEL = 'gemini-embedding-001'
+
+def record_token_usage(model_name, input_tokens, output_tokens):
+    """토큰 사용량 DB 기록"""
+    try:
+        supabase.table("token_usage").insert({
+            "model_name": model_name, 
+            "input_tokens": input_tokens, 
+            "output_tokens": output_tokens
+        }).execute()
+    except Exception as e:
+        print(f"토큰 기록 실패: {e}")
 
 def get_query_embedding(query_text):
     response = client.models.embed_content(model=EMBEDDING_MODEL, contents=query_text)
@@ -45,18 +55,19 @@ def generate_rag_response(query_text, chunks):
     if not chunks:
         return "현재 데이터베이스 내에서 질문과 관련된 규제 가이드라인 내용을 찾을 수 없습니다. 다른 키워드로 검색해 보십시오.", []
 
-    context_text = "\n\n".join([f"[출처 번호: {i+1}] (URL: {c['url']})\n{c['content']}" for i, c in enumerate(chunks)])
+    # Reranking: 가장 관련성 높은 상위 5개 청크만 활용하여 노이즈 감소
+    top_chunks = chunks[:5]
+    context_text = "\n\n".join([f"[출처 번호: {i+1}] (URL: {c['url']})\n{c['content']}" for i, c in enumerate(top_chunks)])
     
-    # 실무 인허가 문서(CTD) 작성 지원을 위한 고도화 프롬프트
+    # 할루시네이션 방지 강화 프롬프트
     prompt = f"""
     당신은 8년 이상 경력의 규제과학(Regulatory Science) 전문가 및 Medical Writer입니다.
-    제공된 [참고 문서]를 바탕으로, 실제 규제기관 제출용 문서(CTD) 작성이나 인허가 전략 수립에 즉시 활용될 수 있는 최고 수준의 답변을 작성하십시오.
+    제공된 [참고 문서]만을 바탕으로 규제기관 제출용 문서(CTD) 작성이나 인허가 전략 수립에 활용될 수 있는 답변을 작성하십시오.
 
-    [지침]
-    1. 비유적 표현을 엄격히 배제하고, ICH, FDA, EMA에서 통용되는 공식 규제 용어를 사용하여 객관적이고 사실적으로 작성하십시오.
-    2. 참고 문서에 명시된 구체적인 수치, 통계적 허용 한계(Margin), 평가 지표, 규제 당국의 권고 사항을 누락 없이 포함하십시오.
-    3. 정보가 불충분할 경우 임의로 추론하지 말고, "해당 가이드라인 원문 조각에는 관련 세부 기준이 명시되어 있지 않습니다"라고 명확히 선을 그으십시오.
-    4. 텍스트 내에서 특정 기준을 언급할 때 반드시 해당 내용이 도출된 [출처 번호: N]를 문장 끝에 명시하십시오.
+    [할루시네이션 방지 엄격 지침]
+    1. 신뢰도 평가: 답변 상단에 '신뢰도: [높음/중간/낮음]'을 명시하십시오. 참고 문서에 관련 정보가 전혀 없다면 '낮음'으로 표기하고 임의의 답변을 생성하지 마십시오.
+    2. 인용구 엄격 제한: 특정 기준, 수치, 통계적 허용 한계(Margin)를 언급할 때 반드시 해당 내용이 도출된 [출처 번호: N]를 문장 끝에 명시하십시오.
+    3. 자기 비판(Self-Critique): 최종 출력 전, 작성한 내용이 참고 문서와 논리적 모순이 없는지 검증하십시오. 비유적 표현을 배제하고 공식 규제 용어만 사용하십시오.
 
     [참고 문서]
     {context_text}
@@ -67,7 +78,13 @@ def generate_rag_response(query_text, chunks):
     
     try:
         response = client.models.generate_content(model=GENERATION_MODEL, contents=prompt)
-        return response.text, chunks 
+        
+        # 토큰 기록
+        in_tokens = response.usage_metadata.prompt_token_count if response.usage_metadata else 0
+        out_tokens = response.usage_metadata.candidates_token_count if response.usage_metadata else 0
+        record_token_usage(GENERATION_MODEL, in_tokens, out_tokens)
+        
+        return response.text, top_chunks 
     except Exception as e:
         return f"답변 생성 오류: {e}", []
 
@@ -121,6 +138,12 @@ def compare_multiple_documents(docs_info):
     """
     try:
         response = client.models.generate_content(model=GENERATION_MODEL, contents=prompt)
+        
+        # 토큰 기록
+        in_tokens = response.usage_metadata.prompt_token_count if response.usage_metadata else 0
+        out_tokens = response.usage_metadata.candidates_token_count if response.usage_metadata else 0
+        record_token_usage(GENERATION_MODEL, in_tokens, out_tokens)
+        
         return response.text
     except Exception as e:
         return f"다중 문서 비교 오류: {e}"
