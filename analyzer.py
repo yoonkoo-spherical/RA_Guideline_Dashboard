@@ -1,5 +1,6 @@
 import os
 import smtplib
+import re
 from email.mime.text import MIMEText
 import requests
 import fitz
@@ -15,7 +16,7 @@ from supabase import create_client, Client
 SUPABASE_URL = os.environ.get("SUPABASE_URL")
 SUPABASE_KEY = os.environ.get("SUPABASE_KEY")
 GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY")
-SCRAPER_API_KEY = os.environ.get("SCRAPER_API_KEY") # 동적 렌더링 및 프록시용 추가
+SCRAPER_API_KEY = os.environ.get("SCRAPER_API_KEY") # 봇 차단 우회용
 
 SMTP_EMAIL = os.environ.get("SMTP_EMAIL")
 SMTP_PASSWORD = os.environ.get("SMTP_PASSWORD")
@@ -53,7 +54,7 @@ def extract_text_with_ocr(pdf_bytes):
         return f"추출 불가: OCR 처리 에러 ({e})"
 
 def fetch_html_with_scraperapi(url):
-    """일반 요청 실패 시 ScraperAPI를 통해 JS 렌더링된 HTML 확보"""
+    """ScraperAPI를 통한 HTML 페이지 렌더링 우회 수집"""
     if not SCRAPER_API_KEY:
         return None
     payload = {'api_key': SCRAPER_API_KEY, 'url': url, 'render': 'true'}
@@ -62,59 +63,100 @@ def fetch_html_with_scraperapi(url):
         if res.status_code == 200:
             return res.text
     except Exception as e:
-        print(f"ScraperAPI 호출 에러: {e}")
+        print(f"ScraperAPI HTML 호출 에러: {e}")
+    return None
+
+def fetch_binary_with_scraperapi(url):
+    """ScraperAPI를 통한 PDF 등 바이너리 파일 차단 우회 다운로드"""
+    if not SCRAPER_API_KEY:
+        return None
+    payload = {'api_key': SCRAPER_API_KEY, 'url': url}
+    try:
+        res = requests.get('https://api.scraperapi.com/', params=payload, timeout=60)
+        if res.status_code == 200 and b"%PDF" in res.content[:5]:
+            return res.content
+    except Exception as e:
+        print(f"ScraperAPI PDF 호출 에러: {e}")
     return None
 
 def extract_text_from_url(url):
     headers = {
-        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
         "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8"
     }
     try:
-        # 1. 문서 직접 접근 시도
+        # 1. 1차 직접 접근
         response = requests.get(url, headers=headers, timeout=30, allow_redirects=True)
         
-        # 2. 결과가 PDF인 경우 즉시 추출
+        # 2. URL 자체가 PDF인 경우 즉시 추출
         is_pdf = "application/pdf" in response.headers.get("Content-Type", "").lower() or url.lower().endswith(".pdf")
         if response.status_code == 200 and is_pdf:
             doc = fitz.open(stream=response.content, filetype="pdf")
             text = "".join(page.get_text() for page in doc)
-            if len(text.strip()) < 50:
-                return extract_text_with_ocr(response.content)
-            return text
+            return text if len(text.strip()) >= 50 else extract_text_with_ocr(response.content)
 
-        # 3. HTML 파싱 (일반 응답이 403이거나 PDF 링크가 자바스크립트에 숨겨진 경우 ScraperAPI 사용)
+        # 3. HTML 파싱 (일반 응답이 403이거나 내용이 부실하면 프록시 우회)
         html_content = response.text if response.status_code == 200 else fetch_html_with_scraperapi(url)
-        
-        # 200 응답이라도 SPA(Single Page Application) 구조라면 내용이 없을 수 있으므로 이중 체크
         if html_content and len(html_content) < 1000: 
             html_content = fetch_html_with_scraperapi(url)
 
         if not html_content:
-            return f"추출 불가: 접근 권한 에러 (HTTP {response.status_code})"
+            return f"추출 불가: 웹페이지 접근 실패 (HTTP {response.status_code})"
 
         soup = BeautifulSoup(html_content, 'html.parser')
         
-        # 4. 보다 유연한 PDF 링크 탐색 조건
+        # 4. 다중 PDF 링크 탐색 (다운로드 버튼들 모두 식별)
         pdf_links = []
         for a in soup.find_all("a", href=True):
             href_lower = a['href'].lower()
-            if ".pdf" in href_lower or "download" in href_lower or "attachment" in href_lower or "document" in href_lower:
+            if href_lower.startswith(('mailto:', 'javascript:', 'tel:', '#')): continue
+            if "acrobat" in href_lower or "get.adobe" in href_lower: continue # Adobe 링크 제외
+            
+            if ".pdf" in href_lower or "download" in href_lower or "attachment" in href_lower or "/media/" in href_lower:
                 pdf_links.append(urljoin(url, a['href']))
 
-        if pdf_links:
-            # 다운로드 시도는 우선 일반 요청으로 진행 (API 크레딧 절약)
-            pdf_res = requests.get(pdf_links[0], headers=headers, timeout=30)
-            if pdf_res.status_code == 200:
-                doc = fitz.open(stream=pdf_res.content, filetype="pdf")
-                text = "".join(page.get_text() for page in doc)
-                if len(text.strip()) < 50:
-                    return extract_text_with_ocr(pdf_res.content)
-                return text
-            else:
-                return f"추출 불가: PDF 링크 다운로드 실패 (HTTP {pdf_res.status_code})"
+        # 5. 찾은 PDF 링크를 모두 순회하며 성공할 때까지 다운로드 시도 (404 에러 시 멈추지 않음)
+        for pdf_url in pdf_links:
+            try:
+                pdf_res = requests.get(pdf_url, headers=headers, timeout=30)
+                pdf_content = None
+                
+                if pdf_res.status_code == 200 and b"%PDF" in pdf_res.content[:5]:
+                    pdf_content = pdf_res.content
+                else:
+                    # 다운로드 실패 (404, 403 등) 시 ScraperAPI로 재시도
+                    pdf_content = fetch_binary_with_scraperapi(pdf_url)
 
-        return "추출 불가: 웹페이지 내 유효한 문서 링크 누락"
+                if pdf_content:
+                    doc = fitz.open(stream=pdf_content, filetype="pdf")
+                    text = "".join(page.get_text() for page in doc)
+                    if len(text.strip()) > 50:
+                        return text
+                    
+                    ocr_text = extract_text_with_ocr(pdf_content)
+                    if not ocr_text.startswith("추출 불가"):
+                        return ocr_text
+            except Exception as e:
+                print(f" -> PDF 시도 에러 ({pdf_url}): {e}")
+                continue # 실패하더라도 다음 링크로 넘어감
+
+        # 6. PDF가 없거나 모두 실패한 경우 -> HTML 웹페이지 본문을 가이드라인 텍스트로 인식 (MHRA 등)
+        for tag in soup(["script", "style", "nav", "footer", "header", "noscript", "aside"]):
+            tag.extract() # 불필요한 레이아웃 태그 제거
+        
+        # 실제 본문이 담기는 주요 태그 탐색
+        main_content = soup.find('main') or soup.find('article') or soup.find('div', class_=re.compile(r'govspeak|main-content|content'))
+        
+        html_text = ""
+        if main_content:
+            html_text = main_content.get_text(separator='\n', strip=True)
+        elif soup.body:
+            html_text = soup.body.get_text(separator='\n', strip=True)
+        
+        if len(html_text.strip()) > 200: # 의미 있는 길이의 본문이 있다면 성공으로 간주
+            return html_text
+
+        return "추출 불가: PDF 링크 다운로드에 실패하였으며, HTML 본문 텍스트도 부족함"
     except Exception as e:
         return f"추출 불가: 예외 발생 ({e})"
 
@@ -178,7 +220,7 @@ def embed_and_store_chunks(url, text):
 def process_unsummarized_docs():
     print("통합 문서 분석 및 임베딩 파이프라인을 시작합니다.")
     
-    # 추출 불가 문서 재처리 포함
+    # 추출 불가로 기록되었거나 요약이 없는 데이터 추출 시도 (10개씩)
     response = supabase.table("guidelines").select("*").or_("ai_summary.is.null,ai_summary.ilike.*추출 불가*").limit(10).execute()
     docs = response.data
     
