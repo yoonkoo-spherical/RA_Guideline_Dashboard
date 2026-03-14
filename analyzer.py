@@ -139,18 +139,34 @@ def extract_text_from_url(url):
         return f"추출 불가: 예외 발생 ({e})"
 
 def analyze_document(text):
+    # 프롬프트를 더욱 강력하고 구조적으로 개선하여 한국어 출력 강제 및 요약 품질 향상
     prompt = f"""
-    당신은 RA 전문가입니다. 다음 가이드라인 원문을 분석하여 JSON 형식으로만 응답하십시오.
-    1. "summary": 핵심 규제 내용 요약 (한국어, 300자 이내)
-    2. "ref_number": 문서의 공식 식별 번호 (예: FDA-2023-D-1234, EMA/CHMP/123). 문서 내에 없다면 "N/A"로 표기할 것.
-    원문:
-    {text[:20000]}
+    당신은 10년 이상 경력의 글로벌 바이오 제약 인허가(RA) 전문가입니다.
+    아래 제공된 가이드라인 원문을 읽고, 규제 및 인허가 실무자 관점에서 가장 중요한 핵심 내용을 엄격하게 '한국어'로만 요약하십시오.
+    
+    [엄격한 지침]
+    1. 언어: 원문이 영어더라도 반드시 100% 자연스러운 한국어로 번역하여 요약할 것. (전문 용어는 괄호 안에 영문 병기 허용)
+    2. 형식: 반드시 아래의 JSON 형식으로만 응답할 것. (마크다운 코드블록 등 기타 텍스트 절대 금지)
+    
+    {{
+        "summary": "가이드라인의 제정 목적과 실무적으로 가장 중요한 핵심 규제 기준을 3~4문장(300자 이내)으로 명확하게 요약한 한국어 텍스트",
+        "ref_number": "문서의 공식 식별 번호 (예: FDA-2023-D-1234, EMA/CHMP/123 등). 원문에서 찾을 수 없다면 무조건 N/A로 표기"
+    }}
+
+    [가이드라인 원문]
+    {text[:25000]}
     """
     try:
-        response = client.models.generate_content(model=GENERATION_MODEL, contents=prompt)
+        # 온도(Temperature)를 낮춰 일관성 있고 보수적인 답변 유도
+        response = client.models.generate_content(
+            model=GENERATION_MODEL, 
+            contents=prompt,
+            config={"temperature": 0.2} 
+        )
         result_text = response.text.replace('```json', '').replace('```', '').strip()
         return json.loads(result_text)
-    except Exception:
+    except Exception as e:
+        print(f"LLM 분석 에러: {e}")
         return {"summary": "요약 실패: LLM 분석 에러", "ref_number": "N/A"}
 
 def compare_documents(old_text, new_text):
