@@ -7,3 +7,5 @@ pandas
 PyMuPDF
 google-genai
 markdown
+pytesseract
+pdf2image
