@@ -18,15 +18,16 @@ SUPABASE_URL = os.environ.get("SUPABASE_URL")
 SUPABASE_KEY = os.environ.get("SUPABASE_KEY")
 GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY")
 SCRAPER_API_KEY = os.environ.get("SCRAPER_API_KEY")
-
 SMTP_EMAIL = os.environ.get("SMTP_EMAIL")
 SMTP_PASSWORD = os.environ.get("SMTP_PASSWORD")
 
 supabase: Client = create_client(SUPABASE_URL, SUPABASE_KEY)
 client = genai.Client(api_key=GEMINI_API_KEY)
 
-GENERATION_MODEL = "gemini-2.5-flash"
-EMBEDDING_MODEL = "gemini-embedding-001"
+# 모델 이원화 적용
+GENERATION_MODEL = "gemini-2.5-flash"      # 단순 요약 및 추출
+REASONING_MODEL = "gemini-2.5-pro"         # 심층 비교 및 추론
+EMBEDDING_MODEL = "text-embedding-004"     # 최신 임베딩 모델
 
 def send_alert_email(subject, content):
     if not SMTP_EMAIL or not SMTP_PASSWORD:
@@ -53,7 +54,6 @@ def extract_text_with_ocr(pdf_bytes):
         return f"추출 불가: OCR 처리 에러 ({e})"
 
 def fetch_html_with_scraperapi(url):
-    """ScraperAPI 호출 및 3회 재시도 로직 적용"""
     if not SCRAPER_API_KEY: return None
     payload = {'api_key': SCRAPER_API_KEY, 'url': url, 'render': 'true'}
     for _ in range(3):
@@ -66,7 +66,6 @@ def fetch_html_with_scraperapi(url):
     return None
 
 def fetch_binary_with_scraperapi(url):
-    """PDF 우회 다운로드 및 3회 재시도 로직 적용"""
     if not SCRAPER_API_KEY: return None
     payload = {'api_key': SCRAPER_API_KEY, 'url': url}
     for _ in range(3):
@@ -139,14 +138,14 @@ def extract_text_from_url(url):
         return f"추출 불가: 예외 발생 ({e})"
 
 def analyze_document(text):
-    # 프롬프트를 더욱 강력하고 구조적으로 개선하여 한국어 출력 강제 및 요약 품질 향상
     prompt = f"""
     당신은 10년 이상 경력의 글로벌 바이오 제약 인허가(RA) 전문가입니다.
     아래 제공된 가이드라인 원문을 읽고, 규제 및 인허가 실무자 관점에서 가장 중요한 핵심 내용을 엄격하게 '한국어'로만 요약하십시오.
     
     [엄격한 지침]
-    1. 언어: 원문이 영어더라도 반드시 100% 자연스러운 한국어로 번역하여 요약할 것. (전문 용어는 괄호 안에 영문 병기 허용)
-    2. 형식: 반드시 아래의 JSON 형식으로만 응답할 것. (마크다운 코드블록 등 기타 텍스트 절대 금지)
+    1. 비유적인 설명을 배제하고, 담백하게 사실관계 위주로 요약할 것.
+    2. 언어: 원문이 영어더라도 반드시 100% 자연스러운 한국어 존댓말로 번역하여 요약할 것.
+    3. 형식: 반드시 아래의 JSON 형식으로만 응답할 것.
     
     {{
         "summary": "가이드라인의 제정 목적과 실무적으로 가장 중요한 핵심 규제 기준을 3~4문장(300자 이내)으로 명확하게 요약한 한국어 텍스트",
@@ -157,23 +156,39 @@ def analyze_document(text):
     {text[:25000]}
     """
     try:
-        # 온도(Temperature)를 낮춰 일관성 있고 보수적인 답변 유도
         response = client.models.generate_content(
             model=GENERATION_MODEL, 
             contents=prompt,
-            config={"temperature": 0.2} 
+            config={"temperature": 0.1}
         )
         result_text = response.text.replace('```json', '').replace('```', '').strip()
         return json.loads(result_text)
-    except Exception as e:
-        print(f"LLM 분석 에러: {e}")
+    except Exception:
         return {"summary": "요약 실패: LLM 분석 에러", "ref_number": "N/A"}
 
 def compare_documents(old_text, new_text):
-    prompt = f"""구버전과 신버전 가이드라인의 주요 변경점을 분석하여 한국어로 요약하십시오.
-    [구버전 핵심 내용]\n{old_text[:15000]}\n[신버전 핵심 내용]\n{new_text[:15000]}"""
+    prompt = f"""
+    당신은 글로벌 규제기관(FDA, EMA 등)에서 수십 년간 근무한 최고 수준의 인허가(RA) 전문 컨설턴트입니다.
+    구버전과 신버전 가이드라인의 주요 변경점을 분석하여 한국어로 요약하십시오.
+    
+    [답변 원칙]
+    1. 비유적인 설명을 절대 사용하지 마십시오.
+    2. 과장된 추임새나 아첨하는 표현을 배제하고, 담백하게 사실관계 위주로 답변하십시오.
+    3. 규제 기준의 변화, 추가된 요구사항, 실무적 대응 방안을 종합적이고 심층적으로 비교 분석하십시오.
+    4. 정중한 한국어 존댓말을 사용하십시오.
+    
+    [구버전 핵심 내용]
+    {old_text[:20000]}
+
+    [신버전 핵심 내용]
+    {new_text[:20000]}
+    """
     try:
-        response = client.models.generate_content(model=GENERATION_MODEL, contents=prompt)
+        response = client.models.generate_content(
+            model=REASONING_MODEL,
+            contents=prompt,
+            config={"temperature": 0.0}
+        )
         return response.text
     except Exception as e:
         return f"비교 분석 실패: {e}"
@@ -194,7 +209,6 @@ def embed_and_store_chunks(url, text):
             }).execute()
         except Exception as e:
             print(f" -> Chunk {index} 임베딩 에러: {e}")
-            # [추가됨] 임베딩 중간 실패 시 불완전한 데이터 롤백(삭제)
             supabase.table("document_chunks").delete().eq("url", url).execute()
             print(" -> 부분 임베딩 찌꺼기 삭제 완료")
             return False
@@ -202,12 +216,15 @@ def embed_and_store_chunks(url, text):
 
 def process_unsummarized_docs():
     print("통합 문서 분석 및 임베딩 파이프라인을 시작합니다.")
-    response = supabase.table("guidelines").select("*").or_("ai_summary.is.null,ai_summary.ilike.*추출 불가*").limit(10).execute()
+    # .limit(10) 제한 제거: 미완료/실패 문서 전체 일괄 처리
+    response = supabase.table("guidelines").select("*").or_("ai_summary.is.null,ai_summary.ilike.*추출 불가*").execute()
     docs = response.data
     
     if not docs:
         print("대기 중이거나 처리할 문서가 없습니다.")
         return
+
+    print(f"총 {len(docs)}건의 문서를 처리합니다.")
 
     for doc in docs:
         doc_url = doc['url']
