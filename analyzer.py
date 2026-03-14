@@ -15,6 +15,7 @@ from supabase import create_client, Client
 SUPABASE_URL = os.environ.get("SUPABASE_URL")
 SUPABASE_KEY = os.environ.get("SUPABASE_KEY")
 GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY")
+SCRAPER_API_KEY = os.environ.get("SCRAPER_API_KEY") # 동적 렌더링 및 프록시용 추가
 
 SMTP_EMAIL = os.environ.get("SMTP_EMAIL")
 SMTP_PASSWORD = os.environ.get("SMTP_PASSWORD")
@@ -51,27 +52,58 @@ def extract_text_with_ocr(pdf_bytes):
     except Exception as e:
         return f"추출 불가: OCR 처리 에러 ({e})"
 
+def fetch_html_with_scraperapi(url):
+    """일반 요청 실패 시 ScraperAPI를 통해 JS 렌더링된 HTML 확보"""
+    if not SCRAPER_API_KEY:
+        return None
+    payload = {'api_key': SCRAPER_API_KEY, 'url': url, 'render': 'true'}
+    try:
+        res = requests.get('https://api.scraperapi.com/', params=payload, timeout=60)
+        if res.status_code == 200:
+            return res.text
+    except Exception as e:
+        print(f"ScraperAPI 호출 에러: {e}")
+    return None
+
 def extract_text_from_url(url):
     headers = {
-        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
         "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8"
     }
     try:
+        # 1. 문서 직접 접근 시도
         response = requests.get(url, headers=headers, timeout=30, allow_redirects=True)
-        if response.status_code != 200:
-            return f"추출 불가: 접근 권한 에러 (HTTP {response.status_code})"
-
-        if "application/pdf" in response.headers.get("Content-Type", "").lower() or url.lower().endswith(".pdf"):
+        
+        # 2. 결과가 PDF인 경우 즉시 추출
+        is_pdf = "application/pdf" in response.headers.get("Content-Type", "").lower() or url.lower().endswith(".pdf")
+        if response.status_code == 200 and is_pdf:
             doc = fitz.open(stream=response.content, filetype="pdf")
             text = "".join(page.get_text() for page in doc)
             if len(text.strip()) < 50:
                 return extract_text_with_ocr(response.content)
             return text
 
-        soup = BeautifulSoup(response.text, 'html.parser')
-        pdf_links = [urljoin(url, a['href']) for a in soup.find_all("a", href=True) if ".pdf" in a['href'].lower() or "download" in a['href'].lower()]
+        # 3. HTML 파싱 (일반 응답이 403이거나 PDF 링크가 자바스크립트에 숨겨진 경우 ScraperAPI 사용)
+        html_content = response.text if response.status_code == 200 else fetch_html_with_scraperapi(url)
+        
+        # 200 응답이라도 SPA(Single Page Application) 구조라면 내용이 없을 수 있으므로 이중 체크
+        if html_content and len(html_content) < 1000: 
+            html_content = fetch_html_with_scraperapi(url)
+
+        if not html_content:
+            return f"추출 불가: 접근 권한 에러 (HTTP {response.status_code})"
+
+        soup = BeautifulSoup(html_content, 'html.parser')
+        
+        # 4. 보다 유연한 PDF 링크 탐색 조건
+        pdf_links = []
+        for a in soup.find_all("a", href=True):
+            href_lower = a['href'].lower()
+            if ".pdf" in href_lower or "download" in href_lower or "attachment" in href_lower or "document" in href_lower:
+                pdf_links.append(urljoin(url, a['href']))
 
         if pdf_links:
+            # 다운로드 시도는 우선 일반 요청으로 진행 (API 크레딧 절약)
             pdf_res = requests.get(pdf_links[0], headers=headers, timeout=30)
             if pdf_res.status_code == 200:
                 doc = fitz.open(stream=pdf_res.content, filetype="pdf")
@@ -80,9 +112,9 @@ def extract_text_from_url(url):
                     return extract_text_with_ocr(pdf_res.content)
                 return text
             else:
-                return "추출 불가: PDF 링크 다운로드 실패"
+                return f"추출 불가: PDF 링크 다운로드 실패 (HTTP {pdf_res.status_code})"
 
-        return "추출 불가: 웹페이지 내 PDF 링크 누락"
+        return "추출 불가: 웹페이지 내 유효한 문서 링크 누락"
     except Exception as e:
         return f"추출 불가: 예외 발생 ({e})"
 
@@ -119,11 +151,9 @@ def compare_documents(old_text, new_text):
         return f"비교 분석 실패: {e}"
 
 def embed_and_store_chunks(url, text):
-    """추출된 텍스트를 분할하여 벡터 데이터베이스에 저장"""
     if len(text.strip()) < 50:
         return False
         
-    # 동일 URL에 대한 기존 임베딩 삭제 (재처리 시 중복 방지)
     supabase.table("document_chunks").delete().eq("url", url).execute()
     
     chunk_size = 1000
@@ -148,7 +178,7 @@ def embed_and_store_chunks(url, text):
 def process_unsummarized_docs():
     print("통합 문서 분석 및 임베딩 파이프라인을 시작합니다.")
     
-    # 처리 대상: 요약이 없거나, 추출 실패 기록이 있는 문서 (최대 10개 제한)
+    # 추출 불가 문서 재처리 포함
     response = supabase.table("guidelines").select("*").or_("ai_summary.is.null,ai_summary.ilike.*추출 불가*").limit(10).execute()
     docs = response.data
     
@@ -160,7 +190,6 @@ def process_unsummarized_docs():
         doc_url = doc['url']
         print(f"\n처리 중: {doc['title']} ({doc_url})")
         
-        # 1. 텍스트 단일 추출 (비용/시간 절감의 핵심)
         text = extract_text_from_url(doc_url)
         
         if "추출 불가" in text:
@@ -168,13 +197,11 @@ def process_unsummarized_docs():
             supabase.table("guidelines").update({"ai_summary": text}).eq("url", doc_url).execute()
             continue
             
-        # 2. 요약 및 식별자 추출
         analysis_result = analyze_document(text)
         summary = analysis_result.get("summary", "N/A")
         ref_num = analysis_result.get("ref_number", "N/A")
         print(f" -> AI 요약 및 식별자({ref_num}) 추출 완료")
         
-        # 3. 신/구버전 자동 비교
         if ref_num != "N/A" and doc.get('ref_number') != ref_num:
             existing_docs = supabase.table("guidelines").select("url").eq("ref_number", ref_num).neq("url", doc_url).execute().data
             if existing_docs:
@@ -188,7 +215,6 @@ def process_unsummarized_docs():
                     send_alert_email(f"[RA 시스템] 가이드라인 업데이트 감지: {ref_num}", comparison_text)
                     print(" -> 버전 비교 완료 및 알림 이메일 발송")
                 
-        # 4. 임베딩 및 DB 적재
         is_embedded = embed_and_store_chunks(doc_url, text)
         if is_embedded:
             print(" -> 벡터 임베딩 및 DB 적재 완료")
@@ -196,7 +222,6 @@ def process_unsummarized_docs():
             print(" -> 벡터 임베딩 실패")
             summary = "요약 성공하였으나 임베딩 중단됨"
 
-        # 5. 상태 최종 업데이트
         supabase.table("guidelines").update({
             "ai_summary": summary,
             "ref_number": ref_num
