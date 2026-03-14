@@ -21,7 +21,7 @@ SCRAPER_API_KEY = os.getenv("SCRAPER_API_KEY")
 supabase: Client = create_client(SUPABASE_URL, SUPABASE_KEY)
 client = genai.Client(api_key=GEMINI_API_KEY)
 
-EMBEDDING_MODEL = "text-embedding-004"
+EMBEDDING_MODEL = "text-embedding-001"
 
 def extract_text_with_ocr(pdf_bytes):
     try:
