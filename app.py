@@ -4,6 +4,9 @@ from supabase import create_client, Client
 import rag_engine
 import json
 import markdown
+from datetime import datetime, timedelta
+from collections import defaultdict
+import re
 
 @st.cache_resource
 def init_connection():
@@ -59,6 +62,14 @@ def save_chat_to_db(role, content):
     except Exception:
         pass
 
+def delete_old_chat_records():
+    """7일이 경과한 채팅 기록 삭제"""
+    try:
+        seven_days_ago = (datetime.utcnow() - timedelta(days=7)).isoformat()
+        supabase.table("chat_history").delete().lt("created_at", seven_days_ago).execute()
+    except Exception:
+        pass
+
 def save_analysis_to_db(docs_info, result):
     try:
         supabase.table("analysis_history").insert({"docs_info": json.dumps(docs_info, ensure_ascii=False), "comparison_result": result}).execute()
@@ -82,6 +93,13 @@ def convert_to_kst(time_str):
         return kst_dt.strftime('%Y-%m-%d %H:%M')
     except Exception:
         return str(time_str).replace("T", " ")[:16]
+
+def clean_html_tags(text):
+    """결과물 내 불필요한 HTML 태그(<br> 등)를 마크다운에 맞게 변환 및 제거하여 가독성 개선"""
+    if not text: return ""
+    text = re.sub(r'<br\s*/?>', '\n', text)
+    text = text.replace('**\n**', '**\n\n**')
+    return text
 
 def main():
     st.set_page_config(page_title="RA 가이드라인 대시보드", layout="wide")
@@ -121,8 +139,14 @@ def main():
     st.sidebar.write(f"- 예상 월간 비용: **${est_cost:.2f}**")
     st.sidebar.caption("※ 현재 API 모델(Flash) 유지 중. 향후 유료 요금제(Pro) 전환 시 실 과금액 추정치입니다.")
 
-    tab1, tab2, tab3, tab4, tab5, tab6 = st.tabs([
-        "📄 문서 검색", "💬 RAG Q&A", "⚖️ 다중 문서 비교", "🔄 신/구버전 비교", "🗂️ 사용 이력", "📤 PDF 수동 업로드"
+    # 탭 순서 변경 및 이름 수정 (RAG Q&A -> Guideline Chatbot)
+    tab_search, tab_old_new, tab_multi, tab_chat, tab_history, tab_upload = st.tabs([
+        "📄 문서 검색", 
+        "🔄 신/구버전 비교", 
+        "⚖️ 다중 문서 비교", 
+        "💬 Guideline Chatbot", 
+        "🗂️ 사용 이력", 
+        "📤 PDF 수동 업로드"
     ])
 
     filtered_df = df[(df['agency'].isin(selected_agencies)) & (df['category'].isin(selected_categories))]
@@ -144,7 +168,7 @@ def main():
     filtered_df['status_score'] = filtered_df.apply(get_status_score, axis=1)
 
     # --- TAB 1: 가이드라인 검색 ---
-    with tab1:
+    with tab_search:
         search_query = st.text_input("가이드라인 제목 검색", "")
         tab1_df = filtered_df.copy()
         if search_query:
@@ -170,9 +194,61 @@ def main():
                 else: st.info("AI 요약 대기 중이거나 추출 불가 문서입니다.")
                 if not row['has_embedding']: st.warning("⚠️ RAG 검색용 벡터 DB에 임베딩되지 않은 문서입니다.")
 
-    # --- TAB 2: RAG Q&A 채팅 ---
-    with tab2:
-        st.markdown("#### 규제 가이드라인 AI 어시스턴트 (gemini-2.5-flash)")
+    # --- TAB 2: 신/구버전 자동 비교 이력 ---
+    with tab_old_new:
+        st.markdown("#### 🔄 규제 가이드라인 신/구버전 변경점 자동 비교")
+        if comp_df.empty:
+            st.info("현재 문서 간의 버전 업데이트(개정) 이력이 감지되지 않았습니다.")
+        else:
+            for index, row in comp_df.iterrows():
+                db_added_date = convert_to_kst(row.get('created_at'))
+                with st.expander(f"업데이트 식별자: {row['ref_number']} | 감지일: {db_added_date}"):
+                    st.markdown(f"**[구버전 원문]({row['old_url']}) ➡️ [신버전 원문]({row['new_url']})**")
+                    st.divider()
+                    st.markdown(row['comparison_text'])
+
+    # --- TAB 3: 다중 문서 수동 비교 ---
+    with tab_multi:
+        st.markdown("#### ⚖️ 다중 문서 수동 비교 분석")
+        # 임베딩 완료 문서만 필터링
+        embedded_only_df = filtered_df[filtered_df['has_embedding'] == True].copy()
+        
+        if embedded_only_df.empty:
+            st.info("임베딩이 완료된 문서가 없습니다.")
+        else:
+            embedded_only_df['상태'] = "🟢 임베딩 완료"
+            df_for_selection = embedded_only_df[['상태', 'title', 'agency', 'category', 'url']].copy()
+            df_for_selection.insert(0, "비교 선택", False)
+            edited_df = st.data_editor(
+                df_for_selection, hide_index=True,
+                column_config={"비교 선택": st.column_config.CheckboxColumn("비교 선택", default=False), "url": None},
+                disabled=["상태", "title", "agency", "category"], use_container_width=True
+            )
+            
+            selected_rows = edited_df[edited_df["비교 선택"]]
+            if st.button("비교 분석 실행", type="primary"):
+                if len(selected_rows) < 2: 
+                    st.warning("문서를 2개 이상 선택해야 합니다.")
+                else:
+                    selected_docs_info = selected_rows.to_dict('records')
+                    with st.spinner("문서 대조 중..."):
+                        try:
+                            comparison_result = rag_engine.compare_multiple_documents(selected_docs_info)
+                            if "오류" in comparison_result:
+                                st.error("문서 비교 분석 중 오류가 발생했습니다. API 토큰 한도를 초과했을 수 있습니다.")
+                            else:
+                                # 가독성 개선: <br> 태그 처리
+                                cleaned_result = clean_html_tags(comparison_result)
+                                save_analysis_to_db(selected_docs_info, cleaned_result)
+                                st.divider()
+                                st.markdown("#### 📊 분석 결과")
+                                st.markdown(cleaned_result, unsafe_allow_html=True)
+                        except Exception:
+                            st.error("분석 서버와의 통신에 실패했습니다.")
+
+    # --- TAB 4: Guideline Chatbot (기존 RAG Q&A) ---
+    with tab_chat:
+        st.markdown("#### 규제 가이드라인 AI 어시스턴트 (Guideline Chatbot)")
         if "messages" not in st.session_state: st.session_state.messages = []
         
         for message in st.session_state.messages:
@@ -207,60 +283,13 @@ def main():
                     except Exception:
                         st.error("예기치 않은 시스템 오류가 발생했습니다. 잠시 후 다시 시도해 주십시오.")
 
-    # --- TAB 3: 다중 문서 수동 비교 ---
-    with tab3:
-        st.markdown("#### ⚖️ 다중 문서 수동 비교 분석")
-        # 임베딩 완료 문서만 필터링
-        embedded_only_df = filtered_df[filtered_df['has_embedding'] == True].copy()
-        
-        if embedded_only_df.empty:
-            st.info("임베딩이 완료된 문서가 없습니다.")
-        else:
-            embedded_only_df['상태'] = "🟢 임베딩 완료"
-            df_for_selection = embedded_only_df[['상태', 'title', 'agency', 'category', 'url']].copy()
-            df_for_selection.insert(0, "비교 선택", False)
-            edited_df = st.data_editor(
-                df_for_selection, hide_index=True,
-                column_config={"비교 선택": st.column_config.CheckboxColumn("비교 선택", default=False), "url": None},
-                disabled=["상태", "title", "agency", "category"], use_container_width=True
-            )
-            
-            selected_rows = edited_df[edited_df["비교 선택"]]
-            if st.button("비교 분석 실행", type="primary"):
-                if len(selected_rows) < 2: 
-                    st.warning("문서를 2개 이상 선택해야 합니다.")
-                else:
-                    selected_docs_info = selected_rows.to_dict('records')
-                    with st.spinner("문서 대조 중..."):
-                        try:
-                            comparison_result = rag_engine.compare_multiple_documents(selected_docs_info)
-                            if "오류" in comparison_result:
-                                st.error("문서 비교 분석 중 오류가 발생했습니다. API 토큰 한도를 초과했을 수 있습니다.")
-                            else:
-                                save_analysis_to_db(selected_docs_info, comparison_result)
-                                st.divider()
-                                st.markdown("#### 📊 분석 결과")
-                                st.markdown(comparison_result)
-                        except Exception:
-                            st.error("분석 서버와의 통신에 실패했습니다.")
-
-    # --- TAB 4: 신/구버전 자동 비교 이력 ---
-    with tab4:
-        st.markdown("#### 🔄 규제 가이드라인 신/구버전 변경점 자동 비교")
-        if comp_df.empty:
-            st.info("현재 문서 간의 버전 업데이트(개정) 이력이 감지되지 않았습니다.")
-        else:
-            for index, row in comp_df.iterrows():
-                db_added_date = convert_to_kst(row.get('created_at'))
-                with st.expander(f"업데이트 식별자: {row['ref_number']} | 감지일: {db_added_date}"):
-                    st.markdown(f"**[구버전 원문]({row['old_url']}) ➡️ [신버전 원문]({row['new_url']})**")
-                    st.divider()
-                    st.markdown(row['comparison_text'])
-
     # --- TAB 5: 사용 이력 및 다운로드 ---
-    with tab5:
-        st.markdown("#### 🗂️ RAG 채팅 및 분석 전체 이력")
+    with tab_history:
+        st.markdown("#### 🗂️ Chatbot 및 분석 전체 이력")
         
+        # 7일 이전 데이터베이스 기록 삭제 실행
+        delete_old_chat_records()
+
         try:
             chat_data = supabase.table("chat_history").select("*").order("created_at", desc=False).execute().data
             analysis_data = supabase.table("analysis_history").select("*").order("created_at", desc=True).execute().data
@@ -275,27 +304,45 @@ def main():
             table { border-collapse: collapse; width: 100%; margin: 20px 0; font-size: 0.95em; }
             th, td { border: 1px solid #ddd; padding: 12px; text-align: left; vertical-align: top; }
             th { background-color: #f0f2f6; font-weight: bold; color: #31333F; }
+            .date-stamp { color: #666; font-size: 0.9em; margin-bottom: 15px; }
         </style>
         """
 
         col1, col2 = st.columns(2)
         
         with col1:
-            st.subheader("💬 RAG 채팅 기록")
+            st.subheader("💬 Guideline Chatbot 기록 (최근 7일)")
             if chat_data:
-                md_chat = "# AI RAG 채팅 기록\n\n"
+                # 데이터를 날짜별로 그룹화
+                daily_chats = defaultdict(list)
                 for chat in chat_data:
-                    role_kr = "사용자" if chat['role'] == 'user' else "AI"
                     chat_time_kst = convert_to_kst(chat.get('created_at'))
-                    md_chat += f"### {role_kr}\n<div class='date-stamp'>작성일시: {chat_time_kst}</div>\n\n{chat['content']}\n\n---\n\n"
+                    date_str = chat_time_kst.split(" ")[0]
+                    daily_chats[date_str].append((chat, chat_time_kst))
+
+                for date_str in sorted(daily_chats.keys(), reverse=True):
+                    chats_for_day = daily_chats[date_str]
+                    
+                    md_chat = f"# {date_str} Guideline Chatbot 기록\n\n"
+                    for chat, chat_time_kst in chats_for_day:
+                        role_kr = "사용자" if chat['role'] == 'user' else "AI"
+                        md_chat += f"### {role_kr}\n<div class='date-stamp'>작성일시: {chat_time_kst}</div>\n\n{chat['content']}\n\n---\n\n"
+                    
+                    try:
+                        html_chat_content = markdown.markdown(md_chat, extensions=['tables'])
+                        final_html_chat = f"<!DOCTYPE html><html><head><meta charset='utf-8'>{css_style}</head><body>{html_chat_content}</body></html>"
+                        st.download_button(
+                            label=f"💾 {date_str} 채팅 기록 다운로드 (.html)", 
+                            data=final_html_chat, 
+                            file_name=f"guideline_chat_{date_str}.html", 
+                            mime="text/html",
+                            key=f"dl_chat_{date_str}"
+                        )
+                    except Exception:
+                        pass
                 
-                try:
-                    html_chat_content = markdown.markdown(md_chat, extensions=['tables'])
-                    final_html_chat = f"<!DOCTYPE html><html><head><meta charset='utf-8'>{css_style}</head><body>{html_chat_content}</body></html>"
-                    st.download_button(label="전체 채팅 기록 다운로드 (.html)", data=final_html_chat, file_name="rag_chat_history.html", mime="text/html")
-                except Exception:
-                    pass
-                
+                st.divider()
+                st.write("▼ 채팅 내역 확인")
                 with st.container(height=600):
                     for chat in chat_data:
                         role_kr = "👤 사용자" if chat['role'] == 'user' else "🤖 AI"
@@ -304,7 +351,7 @@ def main():
                         st.write(chat['content'])
                         st.divider()
             else:
-                st.info("저장된 채팅 기록이 없습니다.")
+                st.info("최근 7일간 저장된 채팅 기록이 없습니다.")
 
         with col2:
             st.subheader("⚖️ 수동 비교 분석 기록")
@@ -325,7 +372,10 @@ def main():
 
                     md_analysis = f"# 다중 문서 수동 비교 분석 리포트\n\n<div class='date-stamp'>분석 일시: {raw_time}</div>\n\n"
                     if doc_titles_list: md_analysis += f"**[분석 대상 문서]**<br>" + "<br>".join(doc_titles_list) + "\n\n<hr>\n\n"
-                    md_analysis += f"{r['comparison_result']}"
+                    
+                    # HTML 변환 전 저장된 결과의 가독성을 위해 치환 처리 적용
+                    cleaned_db_result = clean_html_tags(r.get('comparison_result', ''))
+                    md_analysis += f"{cleaned_db_result}"
                     
                     try:
                         html_analysis_content = markdown.markdown(md_analysis, extensions=['tables'])
@@ -342,12 +392,12 @@ def main():
                                 delete_analysis_record(r['id'])
                                 st.rerun()
                         st.divider()
-                        st.markdown(r['comparison_result'])
+                        st.markdown(cleaned_db_result, unsafe_allow_html=True)
             else:
                 st.info("저장된 비교 분석 기록이 없습니다.")
 
     # --- TAB 6: PDF 업로드 ---
-    with tab6:
+    with tab_upload:
         st.markdown("#### 📤 로컬 PDF 가이드라인 업로드")
         st.write("PC 환경의 가이드라인 문서를 직접 업로드하여 데이터베이스에 추가합니다.")
         
