@@ -434,7 +434,7 @@ def main():
         
         col1, col2 = st.columns(2)
         with col1:
-            agency_input = st.selectbox("발행 기관 (Agency)", ["FDA", "EMA", "ICH", "MFDS", "기타"])
+            agency_input = st.selectbox("발행 기관 (Agency)", ["FDA", "EMA", "MHRA", "Health Canada", "ICH", "MFDS", "기타"])
         with col2:
             category_input = st.text_input("카테고리/키워드 (예: CMC, 임상, 비임상)")
             
