@@ -1,6 +1,7 @@
 import os
 import time
 import re
+import json
 import requests
 import fitz
 import pytesseract
@@ -13,7 +14,6 @@ from dotenv import load_dotenv
 
 load_dotenv()
 
-# 1. 환경 변수 및 설정
 SUPABASE_URL = os.getenv("SUPABASE_URL")
 SUPABASE_KEY = os.getenv("SUPABASE_KEY")
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
@@ -32,80 +32,89 @@ def extract_text_with_ocr(pdf_bytes):
     except Exception:
         return "추출 불가"
 
-def fetch_html_with_scraperapi(url):
-    if not SCRAPER_API_KEY: return None
-    payload = {'api_key': SCRAPER_API_KEY, 'url': url, 'render': 'true'}
+def fetch_content_with_scraperapi(url, render='false'):
+    if not SCRAPER_API_KEY: return None, None
+    payload = {'api_key': SCRAPER_API_KEY, 'url': url, 'render': render}
     for _ in range(3):
         try:
             res = requests.get('https://api.scraperapi.com/', params=payload, timeout=60)
-            if res.status_code == 200: return res.text
+            if res.status_code == 200: 
+                return res.content, res.headers.get("Content-Type", "")
             time.sleep(2)
         except Exception:
             time.sleep(2)
-    return None
+    return None, None
 
-def fetch_binary_with_scraperapi(url):
-    if not SCRAPER_API_KEY: return None
-    payload = {'api_key': SCRAPER_API_KEY, 'url': url}
-    for _ in range(3):
+def process_raw_content(content_bytes, content_type, url):
+    if not content_bytes:
+        return None
+        
+    content_type = content_type.lower()
+    
+    if content_bytes.startswith(b"%PDF") or "application/pdf" in content_type:
         try:
-            res = requests.get('https://api.scraperapi.com/', params=payload, timeout=60)
-            if res.status_code == 200 and res.content.startswith(b"%PDF"): return res.content
-            time.sleep(2)
+            doc = fitz.open(stream=content_bytes, filetype="pdf")
+            text = "".join(page.get_text() for page in doc)
+            if len(text.strip()) >= 50:
+                return text
+            return extract_text_with_ocr(content_bytes)
         except Exception:
-            time.sleep(2)
-    return None
+            return None
 
-def extract_text(url):
+    if "text/html" in content_type or b"<html" in content_bytes[:500].lower():
+        soup = BeautifulSoup(content_bytes, 'html.parser')
+        
+        pdf_links = [urljoin(url, a['href']) for a in soup.find_all("a", href=True) 
+                     if ".pdf" in a['href'].lower() or "download" in a['href'].lower()]
+        
+        for pdf_url in pdf_links:
+            try:
+                pdf_res = requests.get(pdf_url, timeout=30)
+                if pdf_res.status_code == 200 and pdf_res.content.startswith(b"%PDF"):
+                    doc = fitz.open(stream=pdf_res.content, filetype="pdf")
+                    text = "".join(page.get_text() for page in doc)
+                    if len(text.strip()) > 50: return text
+            except Exception:
+                continue
+
+        for tag in soup(["script", "style", "nav", "footer", "header", "noscript", "aside"]): 
+            tag.extract()
+            
+        main_content = soup.find('main') or soup.find('article') or soup.find('div', class_=re.compile(r'govspeak|main-content|content'))
+        html_text = main_content.get_text(separator='\n', strip=True) if main_content else soup.body.get_text(separator='\n', strip=True) if soup.body else ""
+        return html_text if len(html_text.strip()) > 200 else None
+
+    if "application/json" in content_type or content_bytes.strip().startswith(b"{"):
+        try:
+            data = json.loads(content_bytes.decode('utf-8'))
+            return json.dumps(data, indent=2, ensure_ascii=False)
+        except Exception:
+            pass
+            
+    try:
+        return content_bytes.decode('utf-8')
+    except Exception:
+        return None
+
+def extract_content_robust(url):
     headers = {
         "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
         "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8"
     }
     try:
         response = requests.get(url, headers=headers, timeout=30, allow_redirects=True)
-        is_pdf_content_type = "application/pdf" in response.headers.get("Content-Type", "").lower()
-        
-        # PDF 파일 검증 로직 추가
-        if response.status_code == 200 and (is_pdf_content_type or url.lower().endswith(".pdf")):
-            if response.content.startswith(b"%PDF"):
-                doc = fitz.open(stream=response.content, filetype="pdf")
-                text = "".join(page.get_text() for page in doc)
-                return text if len(text.strip()) >= 50 else extract_text_with_ocr(response.content)
-
-        html_content = response.text if response.status_code == 200 else fetch_html_with_scraperapi(url)
-        if html_content and len(html_content) < 1000: 
-            html_content = fetch_html_with_scraperapi(url)
-        if not html_content: return None
-
-        soup = BeautifulSoup(html_content, 'html.parser')
-        pdf_links = [urljoin(url, a['href']) for a in soup.find_all("a", href=True) 
-                     if ".pdf" in a['href'].lower() or "download" in a['href'].lower() or "attachment" in a['href'].lower()]
-
-        for pdf_url in pdf_links:
-            try:
-                pdf_res = requests.get(pdf_url, headers=headers, timeout=30)
-                pdf_content = None
+        if response.status_code == 200:
+            text = process_raw_content(response.content, response.headers.get("Content-Type", ""), url)
+            if text and not text.startswith("추출 불가"):
+                return text
                 
-                if pdf_res.status_code == 200 and pdf_res.content.startswith(b"%PDF"):
-                    pdf_content = pdf_res.content
-                else:
-                    pdf_content = fetch_binary_with_scraperapi(pdf_url)
-
-                if pdf_content and pdf_content.startswith(b"%PDF"):
-                    doc = fitz.open(stream=pdf_content, filetype="pdf")
-                    text = "".join(page.get_text() for page in doc)
-                    if len(text.strip()) > 50: return text
-            except Exception:
-                continue 
-
-        for tag in soup(["script", "style", "nav", "footer", "header", "noscript", "aside"]): tag.extract()
-        main_content = soup.find('main') or soup.find('article') or soup.find('div', class_=re.compile(r'govspeak|main-content|content'))
-        html_text = main_content.get_text(separator='\n', strip=True) if main_content else soup.body.get_text(separator='\n', strip=True) if soup.body else ""
+        content_bytes, c_type = fetch_content_with_scraperapi(url, render='true')
+        text = process_raw_content(content_bytes, c_type, url)
+        return text if text else "추출 불가"
         
-        return html_text if len(html_text.strip()) > 200 else None
     except Exception as e:
         print(f"Extraction failed: {e}")
-        return None
+        return "추출 불가"
 
 def clean_and_chunk_text(text, chunk_size=1000, overlap=100):
     text = re.sub(r'\s+', ' ', text).strip()
@@ -119,7 +128,6 @@ def clean_and_chunk_text(text, chunk_size=1000, overlap=100):
 def process_embeddings():
     print("--- Starting Document Embedding (Batch Tracking & Retry Mode) ---")
     
-    # 요약이 정상적으로 끝난(추출 실패가 아닌) 문서의 url만 가져옵니다.
     all_docs = supabase.table("guidelines").select("url, title").not_.ilike("ai_summary", "%추출 불가%").not_.is_("ai_summary", "null").execute().data
     valid_chunks_response = supabase.table("document_chunks").select("url").neq("content", "FAILED").execute().data
     valid_embedded_urls = {item['url'] for item in valid_chunks_response}
@@ -135,10 +143,9 @@ def process_embeddings():
     for target_doc in unprocessed_docs:
         print(f"\nProcessing / Retrying: {target_doc['title']}")
         
-        # 기존 불완전한 청크 삭제
         supabase.table("document_chunks").delete().eq("url", target_doc["url"]).execute()
         
-        text = extract_text(target_doc['url'])
+        text = extract_content_robust(target_doc['url'])
         
         if not text or text.startswith("추출 불가") or text == "FAILED":
             print(" -> 텍스트 추출 실패. 임베딩 생략.")
