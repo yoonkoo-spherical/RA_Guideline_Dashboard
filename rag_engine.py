@@ -16,9 +16,13 @@ except Exception as e:
 
 client = genai.Client(api_key=GEMINI_API_KEY)
 
-# 모델 이원화 적용 (모든 추론/답변 생성 기능에 Pro 모델 적용)
+# 최고 성능 모델로 업그레이드 (다중 문서 처리 및 고도화된 추론용)
 REASONING_MODEL = "gemini-3.1-pro-preview"
 EMBEDDING_MODEL = "gemini-embedding-001"
+
+# 비용 최적화를 위한 토큰 관리 상수 (128k 토큰 초과 시 비용 2배 증가 방지용)
+# 보통 1 토큰 = 3~4 글자(영문 기준), 한글은 효율이 다르나 보수적으로 120,000 토큰 = 약 250,000자로 산정
+MAX_TOTAL_CHARS = 250000 
 
 def get_embedding(text):
     try:
@@ -34,12 +38,12 @@ def ask_guideline(query):
         if not query_embedding:
             return "답변 생성 오류: 쿼리 임베딩 생성에 실패했습니다.", []
 
-        # Supabase RPC를 통한 유사도 검색
+        # 검색 청크 수 확대 (8 -> 15): 더 넓은 문맥 확보로 답변 정합성 개선
         try:
             search_res = supabase.rpc("match_document_chunks", {
                 "query_embedding": query_embedding,
                 "match_threshold": 0.5,
-                "match_count": 8
+                "match_count": 15
             }).execute()
             docs = search_res.data
         except Exception as rpc_e:
@@ -54,16 +58,15 @@ def ask_guideline(query):
             unique_urls = list({d['url']: d for d in docs}.values())
             sources = [{"url": d['url']} for d in unique_urls]
 
-        # [핵심 변경] 하이브리드 추론 및 출처 분리 프롬프트 적용
         system_prompt = """
         당신은 글로벌 규제기관(FDA, EMA, ICH 등)에서 수십 년간 근무한 최고 수준의 인허가(RA) 전문 컨설턴트입니다.
         
-        [답변 원칙 및 할루시네이션 방지 지침]
-        1. [문서 기반 및 지식의 확장] 답변의 핵심 팩트는 반드시 제공된 [검색된 가이드라인 내용]에 근거해야 합니다. 단, 사용자의 질문이 특정 기간의 규제 동향, 글로벌 규제 조화(Harmonization), 또는 실무적 파급 효과 등 폭넓은 통찰을 요구하는 경우, 당신이 보유한 검증된 규제 전문 지식을 활용하여 심층적인 배경 설명과 트렌드 분석을 제공하십시오.
-        2. [정보 출처의 명확한 분리] 답변 시 "제공된 문서 내용에 따르면..."과 "일반적인 글로벌 규제 동향 및 배경 지식에 따르면..."을 명확히 구분하여 서술하십시오. 문서에 없는 내용을 마치 특정 가이드라인에 명시된 것처럼 지어내지 마십시오(할루시네이션 엄격 금지).
-        3. [모호성 배제] 아직 확립되지 않은 최신 규제나 불확실한 정보에 대해서는 임의로 추측하지 말고, "현재 명확히 규정된 바는 없으나 실무적으로는..." 또는 "추가적인 규제기관의 가이던스 확인이 필요합니다"라고 객관적인 한계를 명시하십시오.
-        4. [객관성 유지] 비유적인 설명이나 과장된 표현, 아첨하는 수사를 절대 배제하고, 철저하게 담백하고 객관적인 사실관계 위주로만 서술하십시오.
-        5. [형식] 전문적이고 정중한 한국어 존댓말을 사용하십시오. 가독성을 위해 마크다운(글머리 기호, 굵은 글씨 등)을 적절히 활용하십시오.
+        [답변 원칙 및 엄격한 지침]
+        1. [객관성 및 사실 기반] 비유적인 설명을 절대 사용하지 말고, 객관적이고 사실적인 설명을 우선시하십시오. 과장된 추임새나 아첨하는 표현을 철저히 배제하고 담백하게 사실관계 위주로만 답변하십시오.
+        2. [정보 출처의 명확한 분리] 답변의 핵심 팩트는 반드시 제공된 [검색된 가이드라인 내용]에 근거해야 합니다. 문서에 없는 내용을 명시된 것처럼 지어내지 마십시오(할루시네이션 엄격 금지).
+        3. [지식의 확장] 사용자의 질문이 폭넓은 통찰을 요구하는 경우, "일반적인 글로벌 규제 동향에 따르면..."과 같이 출처를 구분하여 당신의 전문 지식을 활용해 심층적인 배경을 설명하십시오.
+        4. [모호성 배제] 아직 확립되지 않은 규제는 임의로 추측하지 말고 한계를 명확히 밝히십시오.
+        5. [언어 및 형식] 정중한 한국어 존댓말을 사용하며, 가독성을 위해 마크다운을 적절히 활용하십시오.
         """
         
         prompt = f"{system_prompt}\n\n[검색된 가이드라인 내용]\n{context_text}\n\n[사용자 질문]\n{query}"
@@ -71,7 +74,7 @@ def ask_guideline(query):
         response = client.models.generate_content(
             model=REASONING_MODEL,
             contents=prompt,
-            config={"temperature": 0.2} # 외부 지식 활용을 위해 0.0에서 0.2로 미세 상향 (창의성이 아닌 추론의 폭 확대)
+            config={"temperature": 0.1} # 사실관계 위주 답변을 위해 온도 하향 조정
         )
         return response.text, sources
     except Exception as e:
@@ -80,21 +83,29 @@ def ask_guideline(query):
 def compare_multiple_documents(docs_info):
     try:
         docs_text = ""
+        doc_count = len(docs_info)
+        
+        # 선택된 문서 수에 따라 각 문서에 할당할 최대 글자 수를 동적으로 계산 (비용 128k Threshold 초과 방지)
+        # N개의 문서일 경우, 시스템 프롬프트 여유분을 빼고 N등분
+        chars_per_doc = (MAX_TOTAL_CHARS - 10000) // doc_count if doc_count > 0 else MAX_TOTAL_CHARS
+
         for i, doc in enumerate(docs_info):
             chunk_res = supabase.table("document_chunks").select("content").eq("url", doc['url']).order("chunk_index").execute()
             full_text = " ".join([c['content'] for c in chunk_res.data])
-            docs_text += f"\n\n--- [문서 {i+1}: {doc.get('title', 'Unknown')} ({doc.get('agency', 'N/A')})] ---\n{full_text[:20000]}" 
+            
+            # 할당된 동적 제한치에 맞춰 텍스트 절사
+            truncated_text = full_text[:chars_per_doc]
+            docs_text += f"\n\n--- [문서 {i+1}: {doc.get('title', 'Unknown')} ({doc.get('agency', 'N/A')})] ---\n{truncated_text}" 
 
-        # [핵심 변경] 다중 문서 비교 시 배경 지식을 활용한 심도 있는 통찰 요구
         system_prompt = """
         당신은 글로벌 규제기관(FDA, EMA, ICH 등)에서 수십 년간 근무한 최고 수준의 인허가(RA) 전문 컨설턴트입니다.
         
-        [다중 문서 비교 원칙 및 할루시네이션 방지 지침]
-        1. [문서 기반의 명확한 대조] 제공된 [분석 대상 문서들]의 텍스트를 바탕으로 요구 자료의 수준 차이, 용어의 정의, 실무적 기준점(Threshold)의 차이를 객관적으로 대조하십시오.
-        2. [전문적 통찰 (지식의 확장)] 단순한 차이점(Gap) 나열에 그치지 마십시오. 당신의 검증된 전문 지식을 동원하여, 왜 이러한 차이가 발생했는지(예: 각 기관의 정책적 기조 차이, 규제 진화의 역사적 배경, 관련 ICH 가이드라인의 영향 등)에 대한 종합적이고 거시적인 통찰을 반드시 포함하십시오.
-        3. [정보 출처의 분리] 명시적인 문서 간의 차이점과, 당신의 지식을 기반으로 한 '정책적 의도 및 배경 분석'을 문단이나 항목으로 명확히 구분하여 서술하십시오. 특정 문서에 없는 내용을 해당 문서의 공식 입장인 것처럼 서술해서는 안 됩니다.
-        4. [객관성 유지] 비유, 과장, 아첨을 철저히 배제하고 담백한 사실관계와 논리적 추론 위주로 서술하십시오.
-        5. [형식] 정중한 한국어 존댓말을 사용하며, 가독성이 뛰어난 마크다운(비교 요약표, 글머리 기호 등)을 적극 활용하여 체계적으로 제시하십시오.
+        [다중 문서 비교 원칙 및 엄격한 지침]
+        1. [객관성 및 사실 기반] 비유적인 설명을 절대 사용하지 말고, 객관적이고 사실적인 설명을 우선시하십시오. 과장된 추임새나 아첨하는 표현을 철저히 배제하고 담백하게 사실관계 위주로만 서술하십시오.
+        2. [문서 기반의 명확한 대조] 제공된 [분석 대상 문서들]의 텍스트를 바탕으로 요구 자료의 수준 차이, 용어의 정의, 실무적 기준점 차이를 객관적으로 대조하십시오.
+        3. [전문적 통찰] 단순한 차이점 나열에 그치지 않고, 왜 이러한 차이가 발생했는지(예: 정책적 기조, 규제 진화 배경 등)에 대한 종합적인 통찰을 포함하십시오.
+        4. [정보 출처 분리] 문서 간의 명시적 차이점과 당신의 지식 기반 배경 분석을 명확히 구분하여 서술하십시오.
+        5. [언어 및 형식] 정중한 한국어 존댓말을 사용하며, 비교 요약표 등 마크다운을 적극 활용하여 체계적으로 제시하십시오.
         """
 
         prompt = f"{system_prompt}\n\n[분석 대상 문서들]\n{docs_text}\n\n위 문서들을 종합적이고 심층적으로 비교 분석하십시오."
@@ -102,7 +113,7 @@ def compare_multiple_documents(docs_info):
         response = client.models.generate_content(
             model=REASONING_MODEL,
             contents=prompt,
-            config={"temperature": 0.2} # 깊이 있는 통찰을 끌어내기 위해 0.2로 설정
+            config={"temperature": 0.1} # 사실관계 기반 대조를 위해 온도 하향 조정
         )
         return response.text
     except Exception as e:
