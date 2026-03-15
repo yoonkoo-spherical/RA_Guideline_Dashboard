@@ -12,6 +12,9 @@ from bs4 import BeautifulSoup
 from urllib.parse import urljoin
 from google import genai
 from supabase import create_client, Client
+from dotenv import load_dotenv
+
+load_dotenv()
 
 # 1. 환경 변수 및 설정
 SUPABASE_URL = os.environ.get("SUPABASE_URL")
@@ -24,10 +27,9 @@ SMTP_PASSWORD = os.environ.get("SMTP_PASSWORD")
 supabase: Client = create_client(SUPABASE_URL, SUPABASE_KEY)
 client = genai.Client(api_key=GEMINI_API_KEY)
 
-# 모델 이원화 적용
+# 모델 설정
 GENERATION_MODEL = "gemini-2.5-flash"      # 단순 요약 및 추출
 REASONING_MODEL = "gemini-2.5-pro"         # 심층 비교 및 추론
-EMBEDDING_MODEL = "gemini-embedding-001"     # 최신 임베딩 모델
 
 def send_alert_email(subject, content):
     if not SMTP_EMAIL or not SMTP_PASSWORD:
@@ -46,9 +48,7 @@ def send_alert_email(subject, content):
 def extract_text_with_ocr(pdf_bytes):
     try:
         images = convert_from_bytes(pdf_bytes)
-        text = ""
-        for img in images:
-            text += pytesseract.image_to_string(img, lang='eng+kor')
+        text = "".join(pytesseract.image_to_string(img, lang='eng+kor') for img in images)
         return text if text.strip() else "추출 불가: OCR 텍스트 인식 실패"
     except Exception as e:
         return f"추출 불가: OCR 처리 에러 ({e})"
@@ -71,7 +71,7 @@ def fetch_binary_with_scraperapi(url):
     for _ in range(3):
         try:
             res = requests.get('https://api.scraperapi.com/', params=payload, timeout=60)
-            if res.status_code == 200 and b"%PDF" in res.content[:5]: return res.content
+            if res.status_code == 200 and res.content.startswith(b"%PDF"): return res.content
             time.sleep(2)
         except Exception:
             time.sleep(2)
@@ -84,12 +84,14 @@ def extract_text_from_url(url):
     }
     try:
         response = requests.get(url, headers=headers, timeout=30, allow_redirects=True)
-        is_pdf = "application/pdf" in response.headers.get("Content-Type", "").lower() or url.lower().endswith(".pdf")
+        is_pdf_content_type = "application/pdf" in response.headers.get("Content-Type", "").lower()
         
-        if response.status_code == 200 and is_pdf:
-            doc = fitz.open(stream=response.content, filetype="pdf")
-            text = "".join(page.get_text() for page in doc)
-            return text if len(text.strip()) >= 50 else extract_text_with_ocr(response.content)
+        # 1차 PDF 직접 다운로드 검증 (매직 넘버 b"%PDF" 확인 필수)
+        if response.status_code == 200 and (is_pdf_content_type or url.lower().endswith(".pdf")):
+            if response.content.startswith(b"%PDF"):
+                doc = fitz.open(stream=response.content, filetype="pdf")
+                text = "".join(page.get_text() for page in doc)
+                return text if len(text.strip()) >= 50 else extract_text_with_ocr(response.content)
 
         html_content = response.text if response.status_code == 200 else fetch_html_with_scraperapi(url)
         if html_content and len(html_content) < 1000: 
@@ -107,16 +109,19 @@ def extract_text_from_url(url):
             if ".pdf" in href_lower or "download" in href_lower or "attachment" in href_lower or "/media/" in href_lower:
                 pdf_links.append(urljoin(url, a['href']))
 
+        # 2차 링크 우회 다운로드 검증
         for pdf_url in pdf_links:
             try:
                 pdf_res = requests.get(pdf_url, headers=headers, timeout=30)
                 pdf_content = None
-                if pdf_res.status_code == 200 and b"%PDF" in pdf_res.content[:5]:
+                
+                # 반드시 PDF 포맷인지 헤더 데이터로 확인
+                if pdf_res.status_code == 200 and pdf_res.content.startswith(b"%PDF"):
                     pdf_content = pdf_res.content
                 else:
                     pdf_content = fetch_binary_with_scraperapi(pdf_url)
 
-                if pdf_content:
+                if pdf_content and pdf_content.startswith(b"%PDF"):
                     doc = fitz.open(stream=pdf_content, filetype="pdf")
                     text = "".join(page.get_text() for page in doc)
                     if len(text.strip()) > 50: return text
@@ -126,6 +131,7 @@ def extract_text_from_url(url):
             except Exception:
                 continue 
 
+        # 3차 HTML 본문 추출
         for tag in soup(["script", "style", "nav", "footer", "header", "noscript", "aside"]):
             tag.extract()
         
@@ -193,30 +199,8 @@ def compare_documents(old_text, new_text):
     except Exception as e:
         return f"비교 분석 실패: {e}"
 
-def embed_and_store_chunks(url, text):
-    if len(text.strip()) < 50: return False
-    supabase.table("document_chunks").delete().eq("url", url).execute()
-    
-    chunk_size = 1000
-    chunks = [text[i:i+chunk_size] for i in range(0, len(text), chunk_size)]
-    
-    for index, chunk in enumerate(chunks):
-        try:
-            response = client.models.embed_content(model=EMBEDDING_MODEL, contents=chunk)
-            embedding_vector = response.embeddings[0].values
-            supabase.table("document_chunks").insert({
-                "url": url, "chunk_index": index, "content": chunk, "embedding": embedding_vector
-            }).execute()
-        except Exception as e:
-            print(f" -> Chunk {index} 임베딩 에러: {e}")
-            supabase.table("document_chunks").delete().eq("url", url).execute()
-            print(" -> 부분 임베딩 찌꺼기 삭제 완료")
-            return False
-    return True
-
 def process_unsummarized_docs():
-    print("통합 문서 분석 및 임베딩 파이프라인을 시작합니다.")
-    # .limit(10) 제한 제거: 미완료/실패 문서 전체 일괄 처리
+    print("--- 문서 요약 분석 및 비교 파이프라인 (임베딩 제외) ---")
     response = supabase.table("guidelines").select("*").or_("ai_summary.is.null,ai_summary.ilike.*추출 불가*").execute()
     docs = response.data
     
@@ -224,7 +208,7 @@ def process_unsummarized_docs():
         print("대기 중이거나 처리할 문서가 없습니다.")
         return
 
-    print(f"총 {len(docs)}건의 문서를 처리합니다.")
+    print(f"총 {len(docs)}건의 문서를 분석합니다.")
 
     for doc in docs:
         doc_url = doc['url']
@@ -235,11 +219,6 @@ def process_unsummarized_docs():
         if "추출 불가" in text:
             print(f" -> {text}")
             supabase.table("guidelines").update({"ai_summary": text}).eq("url", doc_url).execute()
-            try:
-                supabase.table("document_chunks").delete().eq("url", doc_url).execute()
-                print(" -> 기존 잘못된 임베딩(더미 데이터) 클렌징 완료")
-            except Exception as e:
-                print(f" -> 임베딩 클렌징 에러: {e}")
             continue
             
         analysis_result = analyze_document(text)
@@ -260,13 +239,6 @@ def process_unsummarized_docs():
                     send_alert_email(f"[RA 시스템] 가이드라인 업데이트 감지: {ref_num}", comparison_text)
                     print(" -> 버전 비교 완료 및 알림 이메일 발송")
                 
-        is_embedded = embed_and_store_chunks(doc_url, text)
-        if is_embedded:
-            print(" -> 벡터 임베딩 및 DB 적재 완료")
-        else:
-            print(" -> 벡터 임베딩 실패")
-            summary = "요약 성공하였으나 임베딩 중단됨"
-
         supabase.table("guidelines").update({
             "ai_summary": summary,
             "ref_number": ref_num
