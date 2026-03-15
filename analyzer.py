@@ -16,7 +16,6 @@ from dotenv import load_dotenv
 
 load_dotenv()
 
-# 1. 환경 변수 및 설정
 SUPABASE_URL = os.environ.get("SUPABASE_URL")
 SUPABASE_KEY = os.environ.get("SUPABASE_KEY")
 GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY")
@@ -27,9 +26,8 @@ SMTP_PASSWORD = os.environ.get("SMTP_PASSWORD")
 supabase: Client = create_client(SUPABASE_URL, SUPABASE_KEY)
 client = genai.Client(api_key=GEMINI_API_KEY)
 
-# 모델 설정
-GENERATION_MODEL = "gemini-2.5-flash"      # 단순 요약 및 추출
-REASONING_MODEL = "gemini-2.5-pro"         # 심층 비교 및 추론
+GENERATION_MODEL = "gemini-2.5-flash"
+REASONING_MODEL = "gemini-2.5-pro"
 
 def send_alert_email(subject, content):
     if not SMTP_EMAIL or not SMTP_PASSWORD:
@@ -86,7 +84,6 @@ def extract_text_from_url(url):
         response = requests.get(url, headers=headers, timeout=30, allow_redirects=True)
         is_pdf_content_type = "application/pdf" in response.headers.get("Content-Type", "").lower()
         
-        # 1차 PDF 직접 다운로드 검증 (매직 넘버 b"%PDF" 확인 필수)
         if response.status_code == 200 and (is_pdf_content_type or url.lower().endswith(".pdf")):
             if response.content.startswith(b"%PDF"):
                 doc = fitz.open(stream=response.content, filetype="pdf")
@@ -109,13 +106,11 @@ def extract_text_from_url(url):
             if ".pdf" in href_lower or "download" in href_lower or "attachment" in href_lower or "/media/" in href_lower:
                 pdf_links.append(urljoin(url, a['href']))
 
-        # 2차 링크 우회 다운로드 검증
         for pdf_url in pdf_links:
             try:
                 pdf_res = requests.get(pdf_url, headers=headers, timeout=30)
                 pdf_content = None
                 
-                # 반드시 PDF 포맷인지 헤더 데이터로 확인
                 if pdf_res.status_code == 200 and pdf_res.content.startswith(b"%PDF"):
                     pdf_content = pdf_res.content
                 else:
@@ -131,7 +126,6 @@ def extract_text_from_url(url):
             except Exception:
                 continue 
 
-        # 3차 HTML 본문 추출
         for tag in soup(["script", "style", "nav", "footer", "header", "noscript", "aside"]):
             tag.extract()
         
@@ -201,6 +195,8 @@ def compare_documents(old_text, new_text):
 
 def process_unsummarized_docs():
     print("--- 문서 요약 분석 및 비교 파이프라인 (임베딩 제외) ---")
+    
+    # 요약문이 비어있거나 실패 이력이 있는 문서를 대상으로 선정
     response = supabase.table("guidelines").select("*").or_("ai_summary.is.null,ai_summary.ilike.*추출 불가*").execute()
     docs = response.data
     
