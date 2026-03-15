@@ -17,7 +17,7 @@ except Exception as e:
 client = genai.Client(api_key=GEMINI_API_KEY)
 
 # 모델 이원화 적용 (모든 추론/답변 생성 기능에 Pro 모델 적용)
-REASONING_MODEL = "gemini-2.5-pro"
+REASONING_MODEL = "gemini-3.1-pro-preview"
 EMBEDDING_MODEL = "gemini-embedding-001"
 
 def get_embedding(text):
