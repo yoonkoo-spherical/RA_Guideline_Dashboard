@@ -27,7 +27,7 @@ supabase: Client = create_client(SUPABASE_URL, SUPABASE_KEY)
 client = genai.Client(api_key=GEMINI_API_KEY)
 
 GENERATION_MODEL = "gemini-2.5-flash"
-REASONING_MODEL = "gemini-2.5-pro"
+REASONING_MODEL = "gemini-3.1-pro-preview"
 
 def send_alert_email(subject, content):
     if not SMTP_EMAIL or not SMTP_PASSWORD:
@@ -139,7 +139,7 @@ def extract_text_from_url(url):
 
 def analyze_document(text):
     prompt = f"""
-    당신은 10년 이상 경력의 글로벌 바이오 제약 인허가(RA) 전문가입니다.
+    당신은 글로벌 규제기관(FDA, EMA, ICH 등)에서 수십 년간 근무한 최고 수준의 인허가(RA) 전문 컨설턴트입니다.
     아래 제공된 가이드라인 원문을 읽고, 규제 및 인허가 실무자 관점에서 가장 중요한 핵심 내용을 엄격하게 '한국어'로만 요약하십시오.
     
     [엄격한 지침]
