@@ -19,7 +19,6 @@ except Exception as e:
     exit(1)
 
 def fetch_with_scraperapi(url, render='false'):
-    """ScraperAPI 프록시를 통한 공통 요청 처리 함수"""
     payload = {
         'api_key': SCRAPER_API_KEY,
         'url': url,
@@ -33,7 +32,7 @@ def fetch_with_scraperapi(url, render='false'):
             if response.status_code == 200:
                 return response.text
             elif response.status_code in [429, 500, 502, 503]:
-                time.sleep(5) # Rate limit 또는 서버 오류 시 대기 후 재시도
+                time.sleep(5)
             else:
                 print(f" -> API Error {response.status_code} for URL: {url}")
                 return None
@@ -43,7 +42,6 @@ def fetch_with_scraperapi(url, render='false'):
     return None
 
 def get_crawler_configs():
-    """DB에서 수집 대상 기관 및 베이스 URL 설정을 가져옴"""
     try:
         response = supabase.table("crawler_configs").select("*").execute()
         return response.data
@@ -51,21 +49,36 @@ def get_crawler_configs():
         print(f"설정 로드 실패: {e}")
         return []
 
+def get_manual_upload_keywords():
+    try:
+        response = supabase.table("guidelines").select("agency, category").ilike("url", "%guidelines_pdf%").execute()
+        manual_docs = response.data
+        keywords_by_agency = {}
+        for doc in manual_docs:
+            agency = doc.get("agency")
+            category = doc.get("category")
+            if agency and category:
+                agency_upper = agency.strip().upper()
+                if agency_upper not in keywords_by_agency:
+                    keywords_by_agency[agency_upper] = set()
+                keywords_by_agency[agency_upper].add(category.strip().lower())
+        return keywords_by_agency
+    except Exception as e:
+        print(f"수동 업로드 키워드 조회 실패: {e}")
+        return {}
+
 def get_base_domain(url):
-    """URL에서 베이스 도메인만 추출 (예: www.fda.gov -> fda.gov)"""
     domain = urlparse(url).netloc
     parts = domain.split('.')
     return '.'.join(parts[-2:]) if len(parts) > 1 else domain
 
 def discover_guidelines(agency, start_url, keywords, current_depth=0, max_depth=2, visited=None, base_domain=None, parent_is_relevant=False):
-    """페이지 내 링크를 탐색하여 가이드라인과 상세 지침을 재귀적으로 수집"""
     if visited is None:
         visited = set()
         
     if base_domain is None:
         base_domain = get_base_domain(start_url)
 
-    # 정규화된 URL로 방문 여부 체크 (무한 루프 방지)
     normalized_url = start_url.split('#')[0].rstrip('/')
     if normalized_url in visited or current_depth > max_depth:
         return []
@@ -81,7 +94,6 @@ def discover_guidelines(agency, start_url, keywords, current_depth=0, max_depth=
     soup = BeautifulSoup(html, 'html.parser')
     found_guidelines = []
 
-    # 현재 방문 중인 페이지 자체가 키워드를 포함하고 있는지 확인 (관련성 상속 로직)
     page_title = soup.title.string if soup.title else ""
     current_page_is_relevant = parent_is_relevant or any(kw.lower() in page_title.lower() or kw.lower() in normalized_url.lower() for kw in keywords)
     
@@ -96,7 +108,6 @@ def discover_guidelines(agency, start_url, keywords, current_depth=0, max_depth=
         is_doc = any(ext in full_url.lower() for ext in [".pdf", "download", "guidance-documents", "/file/"])
         is_relevant = any(kw.lower() in title.lower() or kw.lower() in full_url.lower() for kw in keywords)
 
-        # 개별 링크에 키워드가 있거나, 부모 페이지가 이미 관련성이 높은 경우 True로 판정
         link_is_relevant = is_relevant or current_page_is_relevant
 
         if is_doc and link_is_relevant:
@@ -120,15 +131,12 @@ def discover_guidelines(agency, start_url, keywords, current_depth=0, max_depth=
     return found_guidelines
 
 def save_to_supabase(guidelines):
-    """수집된 데이터를 검증하고 DB에 존재하지 않는 신규 문서만 저장"""
     if not guidelines:
         print("수집된 문서가 없습니다.")
         return
         
-    # 1. 스크립트 실행 중 중복 수집된 문서 제거 (URL 기준)
     unique_docs = list({doc['url']: doc for doc in guidelines}.values())
     
-    # 2. Supabase DB에 기존에 저장된 URL 목록 가져오기 (비교용)
     try:
         existing_records = supabase.table("guidelines").select("url").execute()
         existing_urls = {record['url'] for record in existing_records.data}
@@ -136,7 +144,6 @@ def save_to_supabase(guidelines):
         print(f"기존 DB URL 조회 실패: {e}")
         existing_urls = set()
 
-    # 3. DB에 없는 새로운 문서만 필터링
     new_docs = [doc for doc in unique_docs if doc['url'] not in existing_urls]
 
     print(f"\n--- 수집 결과 요약 ---")
@@ -151,7 +158,6 @@ def save_to_supabase(guidelines):
     success_count = 0
     for doc in new_docs:
         try:
-            # 중복 검증을 마쳤으므로 바로 insert 처리 (에러 방지용으로 upsert 유지)
             supabase.table("guidelines").upsert(doc, on_conflict="url").execute()
             success_count += 1
         except Exception as e:
@@ -170,12 +176,25 @@ if __name__ == "__main__":
             {"agency": "Health Canada", "base_url": "https://www.canada.ca/en/health-canada/services/drugs-health-products/biologics-radiopharmaceuticals-genetic-therapies/applications-submissions/guidance-documents.html", "keywords": "biosimilar,biologic"}
         ]
 
+    manual_keywords = get_manual_upload_keywords()
+
+    for config in configs:
+        agency = config['agency']
+        agency_upper = agency.strip().upper()
+        existing_keywords = set(k.strip() for k in config.get('keywords', 'biosimilar').split(','))
+        
+        if agency_upper in manual_keywords:
+            existing_keywords.update(manual_keywords[agency_upper])
+            
+        config['keywords'] = ",".join(list(existing_keywords))
+        print(f"[{agency}] 최종 스크래핑 키워드 적용: {config['keywords']}")
+
     all_collected_docs = []
 
     for config in configs:
         agency = config['agency']
         start_url = config['base_url']
-        keywords = [k.strip() for k in config.get('keywords', 'biosimilar').split(',')]
+        keywords = [k.strip() for k in config.get('keywords', '').split(',') if k.strip()]
         
         docs = discover_guidelines(agency, start_url, keywords)
         all_collected_docs.extend(docs)
