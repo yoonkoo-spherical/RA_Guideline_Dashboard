@@ -13,6 +13,7 @@ from dotenv import load_dotenv
 
 load_dotenv()
 
+# 1. 환경 변수 및 설정
 SUPABASE_URL = os.getenv("SUPABASE_URL")
 SUPABASE_KEY = os.getenv("SUPABASE_KEY")
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
@@ -27,9 +28,9 @@ def extract_text_with_ocr(pdf_bytes):
     try:
         images = convert_from_bytes(pdf_bytes)
         text = "".join(pytesseract.image_to_string(img, lang='eng+kor') for img in images)
-        return text if text.strip() else "FAILED"
+        return text if text.strip() else "추출 불가"
     except Exception:
-        return "FAILED"
+        return "추출 불가"
 
 def fetch_html_with_scraperapi(url):
     if not SCRAPER_API_KEY: return None
@@ -49,22 +50,27 @@ def fetch_binary_with_scraperapi(url):
     for _ in range(3):
         try:
             res = requests.get('https://api.scraperapi.com/', params=payload, timeout=60)
-            if res.status_code == 200 and b"%PDF" in res.content[:5]: return res.content
+            if res.status_code == 200 and res.content.startswith(b"%PDF"): return res.content
             time.sleep(2)
         except Exception:
             time.sleep(2)
     return None
 
 def extract_text(url):
-    headers = {"User-Agent": "Mozilla/5.0"}
+    headers = {
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
+        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8"
+    }
     try:
         response = requests.get(url, headers=headers, timeout=30, allow_redirects=True)
-        is_pdf = "application/pdf" in response.headers.get("Content-Type", "").lower() or url.lower().endswith(".pdf")
+        is_pdf_content_type = "application/pdf" in response.headers.get("Content-Type", "").lower()
         
-        if response.status_code == 200 and is_pdf:
-            doc = fitz.open(stream=response.content, filetype="pdf")
-            text = "".join(page.get_text() for page in doc)
-            return text if len(text.strip()) >= 50 else extract_text_with_ocr(response.content)
+        # PDF 파일 검증 로직 추가
+        if response.status_code == 200 and (is_pdf_content_type or url.lower().endswith(".pdf")):
+            if response.content.startswith(b"%PDF"):
+                doc = fitz.open(stream=response.content, filetype="pdf")
+                text = "".join(page.get_text() for page in doc)
+                return text if len(text.strip()) >= 50 else extract_text_with_ocr(response.content)
 
         html_content = response.text if response.status_code == 200 else fetch_html_with_scraperapi(url)
         if html_content and len(html_content) < 1000: 
@@ -78,8 +84,14 @@ def extract_text(url):
         for pdf_url in pdf_links:
             try:
                 pdf_res = requests.get(pdf_url, headers=headers, timeout=30)
-                pdf_content = pdf_res.content if (pdf_res.status_code == 200 and b"%PDF" in pdf_res.content[:5]) else fetch_binary_with_scraperapi(pdf_url)
-                if pdf_content:
+                pdf_content = None
+                
+                if pdf_res.status_code == 200 and pdf_res.content.startswith(b"%PDF"):
+                    pdf_content = pdf_res.content
+                else:
+                    pdf_content = fetch_binary_with_scraperapi(pdf_url)
+
+                if pdf_content and pdf_content.startswith(b"%PDF"):
                     doc = fitz.open(stream=pdf_content, filetype="pdf")
                     text = "".join(page.get_text() for page in doc)
                     if len(text.strip()) > 50: return text
@@ -107,22 +119,23 @@ def clean_and_chunk_text(text, chunk_size=1000, overlap=100):
 def process_embeddings():
     print("--- Starting Document Embedding (Batch Tracking & Retry Mode) ---")
     
-    all_docs = supabase.table("guidelines").select("url, title").execute().data
+    # 요약이 정상적으로 끝난(추출 실패가 아닌) 문서의 url만 가져옵니다.
+    all_docs = supabase.table("guidelines").select("url, title").not_.ilike("ai_summary", "%추출 불가%").not_.is_("ai_summary", "null").execute().data
     valid_chunks_response = supabase.table("document_chunks").select("url").neq("content", "FAILED").execute().data
     valid_embedded_urls = {item['url'] for item in valid_chunks_response}
     
     unprocessed_docs = [doc for doc in all_docs if doc['url'] not in valid_embedded_urls]
     
     if not unprocessed_docs:
-        print("모든 문서의 정상 임베딩이 완료되었습니다.")
+        print("모든 유효 문서의 임베딩이 완료되었습니다.")
         return
 
-    print(f"총 {len(unprocessed_docs)}건의 미완료/실패 문서 임베딩을 일괄 진행합니다.")
+    print(f"총 {len(unprocessed_docs)}건의 미완료 문서 임베딩을 일괄 진행합니다.")
 
-    # [:3] 제한 제거: 횟수 제한 없이 전체 문서 순차 처리
     for target_doc in unprocessed_docs:
         print(f"\nProcessing / Retrying: {target_doc['title']}")
         
+        # 기존 불완전한 청크 삭제
         supabase.table("document_chunks").delete().eq("url", target_doc["url"]).execute()
         
         text = extract_text(target_doc['url'])
@@ -151,7 +164,7 @@ def process_embeddings():
                 }).execute()
                 
                 print(f"   - Chunk {i+1}/{len(chunks)} 저장 완료")
-                time.sleep(1) # 유료 플랜이므로 대기 시간 단축
+                time.sleep(1)
                 
             except Exception as e:
                 print(f"   - Chunk {i+1} 임베딩 실패: {e}")
