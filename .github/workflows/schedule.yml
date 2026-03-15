@@ -2,7 +2,7 @@ name: Daily Guideline Scraper
 
 on:
   schedule:
-    - cron: '0 20 * * *'
+    - cron: '0 15 * * *' # KST 기준 매일 00:00
   workflow_dispatch:
 
 jobs:
@@ -30,12 +30,3 @@ jobs:
           SCRAPER_API_KEY: ${{ secrets.SCRAPER_API_KEY }}
         run: |
           python scraper.py
-
-      - name: AI 요약 스크립트 실행 (Run analyzer)
-        env:
-          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
-          SUPABASE_KEY: ${{ secrets.SUPABASE_KEY }}
-          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
-          SCRAPER_API_KEY: ${{ secrets.SCRAPER_API_KEY }}
-        run: |
-          python analyzer.py
