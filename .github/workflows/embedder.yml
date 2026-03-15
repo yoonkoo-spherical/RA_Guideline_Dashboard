@@ -2,8 +2,7 @@ name: Daily Document Embedder
 
 on:
   schedule:
-    # 6시간 간격으로 하루 4회 실행 (예: UTC 00, 06, 12, 18)
-    - cron: '0 */6 * * *'
+    - cron: '0 18 * * *' # KST 기준 매일 03:00
   workflow_dispatch:
 
 jobs:
