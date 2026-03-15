@@ -28,7 +28,6 @@ def load_data():
     comp_response = supabase.table("version_comparisons").select("*").execute()
     comp_df = pd.DataFrame(comp_response.data)
     
-    # 수정: content가 'FAILED'인 더미 데이터는 임베딩 완료로 취급하지 않음
     chunk_response = supabase.table("document_chunks").select("url").neq("content", "FAILED").execute()
     embedded_urls = set([item['url'] for item in chunk_response.data])
     
@@ -192,30 +191,25 @@ def main():
 
     def check_summary(text):
         if pd.isna(text) or str(text).strip() == "": return False
-        if "텍스트 추출 불가" in str(text): return False
+        if "추출 불가" in str(text): return False
         return True
         
     filtered_df['has_summary'] = filtered_df['ai_summary'].apply(check_summary)
     filtered_df['has_embedding'] = filtered_df['url'].isin(embedded_urls)
     
     def get_status_score(row):
-        # 정상 처리 완료
         if row['has_summary'] and row['has_embedding']: return 4
         if row['has_summary'] and not row['has_embedding']: return 3
-        # 논리적 데이터 불일치 (요약 실패했으나 벡터 DB에 값이 존재)
         if not row['has_summary'] and row['has_embedding']: return -1
-        # 대기 중 또는 영구 추출 실패
         return 1
         
     filtered_df['status_score'] = filtered_df.apply(get_status_score, axis=1)
 
-    # 사이드바 데이터 불일치 경고 로직 추가
     error_count = len(filtered_df[filtered_df['status_score'] == -1])
     if error_count > 0:
         st.sidebar.divider()
         st.sidebar.error(f"⚠️ 데이터 불일치 문서: {error_count}건\n\n(요약은 없으나 벡터 DB에 데이터가 존재합니다. '문서 검색' 탭에서 확인하십시오.)")
 
-    # --- TAB 1: 가이드라인 검색 ---
     with tab_search:
         search_query = st.text_input("가이드라인 제목 검색", "")
         tab1_df = filtered_df.copy()
@@ -225,7 +219,6 @@ def main():
         st.subheader(f"검색 결과: {len(tab1_df)} 건")
         
         for index, row in tab1_df.iterrows():
-            # 상태에 따른 명확한 아이콘 분류
             if row['status_score'] == 4: 
                 status_icon = "🟢 [완료]"
             elif row['status_score'] == 3: 
@@ -260,7 +253,6 @@ def main():
                 elif not row['has_embedding']: 
                     st.warning("⚠️ RAG 검색용 벡터 DB에 임베딩되지 않은 문서입니다.")
 
-    # --- TAB 2: 신/구버전 자동 비교 이력 ---
     with tab_old_new:
         st.markdown("#### 🔄 규제 가이드라인 신/구버전 변경점 자동 비교")
         if comp_df.empty:
@@ -273,10 +265,9 @@ def main():
                     st.divider()
                     st.markdown(row['comparison_text'])
 
-    # --- TAB 3: 다중 문서 수동 비교 ---
     with tab_multi:
         st.markdown("#### ⚖️ 다중 문서 수동 비교 분석")
-        embedded_only_df = filtered_df[filtered_df['status_score'] == 4].copy() # 정상 완료된 문서만 필터링
+        embedded_only_df = filtered_df[filtered_df['status_score'] == 4].copy() 
         
         if embedded_only_df.empty:
             st.info("임베딩 및 요약이 정상적으로 완료된 문서가 없습니다.")
@@ -311,7 +302,6 @@ def main():
                         except Exception:
                             st.error("분석 서버와의 통신에 실패했습니다.")
 
-    # --- TAB 4: Guideline Chatbot ---
     with tab_chat:
         st.markdown("#### 규제 가이드라인 AI 어시스턴트 (Guideline Chatbot)")
         if "messages" not in st.session_state: st.session_state.messages = []
@@ -348,7 +338,6 @@ def main():
                     except Exception:
                         st.error("예기치 않은 시스템 오류가 발생했습니다. 잠시 후 다시 시도해 주십시오.")
 
-    # --- TAB 5: 사용 이력 및 다운로드 ---
     with tab_history:
         st.markdown("#### 🗂️ Chatbot 및 분석 전체 이력")
         delete_old_chat_records()
@@ -457,7 +446,6 @@ def main():
             else:
                 st.info("저장된 비교 분석 기록이 없습니다.")
 
-    # --- TAB 6: PDF 업로드 ---
     with tab_upload:
         st.markdown("#### 📤 로컬 PDF 가이드라인 업로드")
         st.write("PC 환경의 가이드라인 문서를 직접 업로드하여 데이터베이스에 추가합니다.")
