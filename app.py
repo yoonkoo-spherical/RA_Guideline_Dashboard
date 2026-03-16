@@ -28,8 +28,14 @@ def load_data():
     comp_response = supabase.table("version_comparisons").select("*").execute()
     comp_df = pd.DataFrame(comp_response.data)
     
-    chunk_response = supabase.table("document_chunks").select("url").neq("content", "FAILED").execute()
-    embedded_urls = set([item['url'] for item in chunk_response.data])
+    # Supabase 기본 1000 한계를 우회하여 페이징 단위로 모든 청크 URL 가져오기
+    embedded_urls = set()
+    page_size = 1000
+    for i in range(100):  # 최대 10만 개 청크까지 조회
+        chunk_response = supabase.table("document_chunks").select("url").neq("content", "FAILED").range(i * page_size, (i + 1) * page_size - 1).execute()
+        if not chunk_response.data:
+            break
+        embedded_urls.update(item['url'] for item in chunk_response.data)
     
     return df, comp_df, embedded_urls
 
