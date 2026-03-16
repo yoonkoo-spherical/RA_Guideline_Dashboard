@@ -32,9 +32,9 @@ def extract_text_with_ocr(pdf_bytes):
     except Exception:
         return "추출 불가"
 
-def fetch_html_with_scraperapi(url):
+def fetch_html_with_scraperapi(url, render='false'):
     if not SCRAPER_API_KEY: return None
-    payload = {'api_key': SCRAPER_API_KEY, 'url': url, 'render': 'true'}
+    payload = {'api_key': SCRAPER_API_KEY, 'url': url, 'render': render}
     for _ in range(3):
         try:
             res = requests.get('https://api.scraperapi.com/', params=payload, timeout=60)
@@ -80,11 +80,14 @@ def extract_content_robust(url):
                 text = "".join(page.get_text() for page in doc)
                 return text if len(text.strip()) >= 50 else extract_text_with_ocr(pdf_content)
 
-        html_content = response.text if response.status_code == 200 else fetch_html_with_scraperapi(url)
-        if html_content and len(html_content) < 1000: 
-            html_content = fetch_html_with_scraperapi(url)
+        # 1차 시도: 일반 HTTP GET이 차단되었거나 실패한 경우 render='false'로 프록시 호출
+        html_content = response.text if response.status_code == 200 else fetch_html_with_scraperapi(url, render='false')
+        
+        # 2차 시도: 렌더링이 필요한 동적 웹페이지인 경우 render='true'로 재호출
+        if not html_content or len(html_content) < 1000: 
+            html_content = fetch_html_with_scraperapi(url, render='true')
 
-        if not html_content: return f"추출 불가: 웹페이지 접근 실패"
+        if not html_content: return "추출 불가: 웹페이지 접근 실패"
 
         soup = BeautifulSoup(html_content, 'html.parser')
         pdf_links = []
@@ -146,7 +149,6 @@ def process_embeddings():
     print("--- 기존 임베딩 완료 문서 개별 확인 중 (1000 한계 우회) ---")
     valid_embedded_urls = set()
     for doc in all_docs:
-        # FAILED 더미 데이터는 무시하고 실제 정상 텍스트 청크가 존재하는지 확인
         res = supabase.table("document_chunks").select("url").eq("url", doc["url"]).neq("content", "FAILED").limit(1).execute()
         if res.data:
             valid_embedded_urls.add(doc["url"])
@@ -162,7 +164,6 @@ def process_embeddings():
     for target_doc in unprocessed_docs:
         print(f"\nProcessing / Retrying: {target_doc['title']}")
         
-        # 문서 작업을 재개하기 전, 해당 문서의 기존 찌꺼기 청크(FAILED 등)를 초기화
         supabase.table("document_chunks").delete().eq("url", target_doc["url"]).execute()
         
         text = extract_content_robust(target_doc['url'])
