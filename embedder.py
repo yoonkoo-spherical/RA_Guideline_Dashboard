@@ -83,7 +83,6 @@ def process_raw_content(content_bytes, content_type, url):
         main_content = soup.find('main') or soup.find('article') or soup.find('div', class_=re.compile(r'govspeak|main-content|content|mws-body|page-body|container'))
         html_text = main_content.get_text(separator='\n', strip=True) if main_content else soup.body.get_text(separator='\n', strip=True) if soup.body else ""
         
-        # analyzer.py와의 추출 기준 정합성을 위해 200자에서 100자로 완화
         return html_text if len(html_text.strip()) > 100 else None
 
     if "application/json" in content_type or content_bytes.strip().startswith(b"{"):
@@ -119,7 +118,6 @@ def extract_content_robust(url):
         return "추출 불가"
 
 def clean_and_chunk_text(text, chunk_size=1000, overlap=100):
-    # Null Byte(\x00) 및 제어 문자 제거 (PostgreSQL 에러 방지)
     text = text.replace('\x00', '').replace('\u0000', '')
     text = re.sub(r'\s+', ' ', text).strip()
     
@@ -134,9 +132,15 @@ def process_embeddings():
     print("--- Starting Document Embedding (Batch Tracking & Retry Mode) ---")
     
     all_docs = supabase.table("guidelines").select("url, title").not_.ilike("ai_summary", "%추출 불가%").not_.is_("ai_summary", "null").execute().data
-    valid_chunks_response = supabase.table("document_chunks").select("url").neq("content", "FAILED").execute().data
-    valid_embedded_urls = {item['url'] for item in valid_chunks_response}
     
+    print("--- 기존 임베딩 완료 문서 개별 확인 중 (1000 한계 우회) ---")
+    valid_embedded_urls = set()
+    for doc in all_docs:
+        # DB에 해당 문서 URL의 청크가 1개라도 존재하는지 개별 조회
+        res = supabase.table("document_chunks").select("url").eq("url", doc["url"]).limit(1).execute()
+        if res.data:
+            valid_embedded_urls.add(doc["url"])
+            
     unprocessed_docs = [doc for doc in all_docs if doc['url'] not in valid_embedded_urls]
     
     if not unprocessed_docs:
@@ -160,35 +164,39 @@ def process_embeddings():
         print(f" -> {len(chunks)} 개의 청크로 분할 완료. 임베딩 시작...")
 
         success = True
-        batch_records = [] # DB 일괄 저장을 위한 리스트 선언
+        batch_records = []
         
         for i, chunk in enumerate(chunks):
-            try:
-                response = client.models.embed_content(
-                    model=EMBEDDING_MODEL,
-                    contents=chunk
-                )
-                embedding_vector = response.embeddings[0].values
-                
-                # 개별 삽입 대신 batch_records 리스트에 임베딩 결과 적재
-                batch_records.append({
-                    "url": target_doc["url"],
-                    "chunk_index": i,
-                    "content": chunk,
-                    "embedding": embedding_vector
-                })
-                
-                print(f"   - Chunk {i+1}/{len(chunks)} 임베딩 추출 완료")
-                
-                # API Limit 고려, 대기 시간을 1초에서 0.1초로 대폭 단축
-                time.sleep(0.1)
-                
-            except Exception as e:
-                print(f"   - Chunk {i+1} API 호출 실패: {e}")
+            embedding_vector = None
+            
+            # API 일시적 오류(503) 극복을 위한 3회 재시도 로직 추가
+            for attempt in range(3):
+                try:
+                    response = client.models.embed_content(
+                        model=EMBEDDING_MODEL,
+                        contents=chunk
+                    )
+                    embedding_vector = response.embeddings[0].values
+                    break # 성공 시 루프 탈출
+                except Exception as e:
+                    print(f"   - Chunk {i+1} API 호출 실패 (시도 {attempt+1}/3): {e}")
+                    time.sleep(2)
+            
+            if not embedding_vector:
+                print(f"   - Chunk {i+1} 최종 임베딩 실패. 진행 중단 및 문서 롤백.")
                 success = False
                 break 
 
-        # API 호출이 모두 성공했고 저장할 청크가 존재하는 경우 Bulk Insert 실행
+            batch_records.append({
+                "url": target_doc["url"],
+                "chunk_index": i,
+                "content": chunk,
+                "embedding": embedding_vector
+            })
+            
+            print(f"   - Chunk {i+1}/{len(chunks)} 임베딩 추출 완료")
+            time.sleep(0.1)
+
         if success and batch_records:
             try:
                 supabase.table("document_chunks").insert(batch_records).execute()
