@@ -47,13 +47,13 @@ def extract_text_with_ocr(pdf_bytes):
     try:
         images = convert_from_bytes(pdf_bytes)
         text = "".join(pytesseract.image_to_string(img, lang='eng+kor') for img in images)
-        return text if text.strip() else "추출 불가: OCR 텍스트 인식 실패"
-    except Exception as e:
-        return f"추출 불가: OCR 처리 에러 ({e})"
+        return text if text.strip() else "추출 불가: OCR 실패"
+    except Exception:
+        return "추출 불가"
 
-def fetch_html_with_scraperapi(url):
+def fetch_html_with_scraperapi(url, render='false'):
     if not SCRAPER_API_KEY: return None
-    payload = {'api_key': SCRAPER_API_KEY, 'url': url, 'render': 'true'}
+    payload = {'api_key': SCRAPER_API_KEY, 'url': url, 'render': render}
     for _ in range(3):
         try:
             res = requests.get('https://api.scraperapi.com/', params=payload, timeout=60)
@@ -83,18 +83,30 @@ def extract_text_from_url(url):
     try:
         response = requests.get(url, headers=headers, timeout=30, allow_redirects=True)
         is_pdf_content_type = "application/pdf" in response.headers.get("Content-Type", "").lower()
+        url_lower = url.lower()
         
-        if response.status_code == 200 and (is_pdf_content_type or url.lower().endswith(".pdf")):
-            if response.content.startswith(b"%PDF"):
-                doc = fitz.open(stream=response.content, filetype="pdf")
+        is_likely_pdf = url_lower.endswith(".pdf") or "download" in url_lower or is_pdf_content_type
+        
+        if is_likely_pdf:
+            pdf_content = None
+            if response.status_code == 200 and response.content.startswith(b"%PDF"):
+                pdf_content = response.content
+            else:
+                pdf_content = fetch_binary_with_scraperapi(url)
+                
+            if pdf_content and pdf_content.startswith(b"%PDF"):
+                doc = fitz.open(stream=pdf_content, filetype="pdf")
                 text = "".join(page.get_text() for page in doc)
-                return text if len(text.strip()) >= 50 else extract_text_with_ocr(response.content)
+                return text if len(text.strip()) >= 50 else extract_text_with_ocr(pdf_content)
 
-        html_content = response.text if response.status_code == 200 else fetch_html_with_scraperapi(url)
-        if html_content and len(html_content) < 1000: 
-            html_content = fetch_html_with_scraperapi(url)
+        # 1차 시도: 일반 HTTP GET이 차단되었거나 실패한 경우 render='false'로 프록시 호출
+        html_content = response.text if response.status_code == 200 else fetch_html_with_scraperapi(url, render='false')
+        
+        # 2차 시도: 렌더링이 필요한 동적 웹페이지인 경우 render='true'로 재호출
+        if not html_content or len(html_content) < 1000: 
+            html_content = fetch_html_with_scraperapi(url, render='true')
 
-        if not html_content: return f"추출 불가: 웹페이지 접근 실패 (HTTP {response.status_code})"
+        if not html_content: return "추출 불가: 웹페이지 접근 실패"
 
         soup = BeautifulSoup(html_content, 'html.parser')
         pdf_links = []
@@ -129,17 +141,17 @@ def extract_text_from_url(url):
         for tag in soup(["script", "style", "nav", "footer", "header", "noscript", "aside"]):
             tag.extract()
         
-        main_content = soup.find('main') or soup.find('article') or soup.find('div', class_=re.compile(r'govspeak|main-content|content'))
+        main_content = soup.find('main') or soup.find('article') or soup.find('div', class_=re.compile(r'govspeak|main-content|content|mws-body|page-body|container'))
         html_text = main_content.get_text(separator='\n', strip=True) if main_content else soup.body.get_text(separator='\n', strip=True) if soup.body else ""
         
-        if len(html_text.strip()) > 200: return html_text
-        return "추출 불가: PDF 링크 다운로드에 실패하였으며, HTML 본문 텍스트도 부족함"
+        if len(html_text.strip()) > 100: return html_text
+        return "추출 불가: HTML 본문 부족"
     except Exception as e:
         return f"추출 불가: 예외 발생 ({e})"
 
 def analyze_document(text):
     prompt = f"""
-    당신은 글로벌 규제기관(FDA, EMA, ICH 등)에서 수십 년간 근무한 최고 수준의 인허가(RA) 전문 컨설턴트입니다.
+    당신은 10년 이상 경력의 글로벌 바이오 제약 인허가(RA) 전문가입니다.
     아래 제공된 가이드라인 원문을 읽고, 규제 및 인허가 실무자 관점에서 가장 중요한 핵심 내용을 엄격하게 '한국어'로만 요약하십시오.
     
     [엄격한 지침]
@@ -196,7 +208,6 @@ def compare_documents(old_text, new_text):
 def process_unsummarized_docs():
     print("--- 문서 요약 분석 및 비교 파이프라인 (임베딩 제외) ---")
     
-    # 요약문이 비어있거나 실패 이력이 있는 문서를 대상으로 선정
     response = supabase.table("guidelines").select("*").or_("ai_summary.is.null,ai_summary.ilike.*추출 불가*").execute()
     docs = response.data
     
