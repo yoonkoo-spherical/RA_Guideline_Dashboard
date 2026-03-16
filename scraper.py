@@ -86,7 +86,12 @@ def discover_guidelines(agency, start_url, keywords, current_depth=0, max_depth=
     visited.add(normalized_url)
     print(f"[{agency}] 탐색 중 (Depth {current_depth}): {normalized_url}")
     
-    html = fetch_with_scraperapi(normalized_url, render='true')
+    # 1차 시도: 1 크레딧 소모 (render='false')
+    html = fetch_with_scraperapi(normalized_url, render='false')
+    
+    # 실패 시 2차 시도: 5 크레딧 소모 (render='true')
+    if not html or len(html) < 500:
+        html = fetch_with_scraperapi(normalized_url, render='true')
     
     if not html:
         return []
