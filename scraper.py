@@ -58,6 +58,8 @@ def extract_content_robust(url):
         "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
         "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8"
     }
+    raw_text = None
+    
     try:
         response = requests.get(url, headers=headers, timeout=30, allow_redirects=True)
         is_pdf_content_type = "application/pdf" in response.headers.get("Content-Type", "").lower()
@@ -75,51 +77,67 @@ def extract_content_robust(url):
             if pdf_content and pdf_content.startswith(b"%PDF"):
                 doc = fitz.open(stream=pdf_content, filetype="pdf")
                 text = "".join(page.get_text() for page in doc)
-                return text if len(text.strip()) >= 50 else extract_text_with_ocr(pdf_content)
+                raw_text = text if len(text.strip()) >= 50 else extract_text_with_ocr(pdf_content)
 
-        html_content = response.text if response.status_code == 200 else fetch_html_with_scraperapi(url, render='false')
-        if not html_content or len(html_content) < 1000: 
-            html_content = fetch_html_with_scraperapi(url, render='true')
+        if not raw_text:
+            html_content = response.text if response.status_code == 200 else fetch_html_with_scraperapi(url, render='false')
+            if not html_content or len(html_content) < 1000: 
+                html_content = fetch_html_with_scraperapi(url, render='true')
 
-        if not html_content: return "추출 불가: 웹페이지 접근 실패"
+            if not html_content: 
+                raw_text = "추출 불가: 웹페이지 접근 실패"
+            else:
+                soup = BeautifulSoup(html_content, 'html.parser')
+                pdf_links = []
+                for a in soup.find_all("a", href=True):
+                    href_lower = a['href'].lower()
+                    if href_lower.startswith(('mailto:', 'javascript:', 'tel:', '#')): continue
+                    if "acrobat" in href_lower or "get.adobe" in href_lower: continue 
+                    if ".pdf" in href_lower or "download" in href_lower or "attachment" in href_lower or "/media/" in href_lower:
+                        pdf_links.append(urljoin(url, a['href']))
 
-        soup = BeautifulSoup(html_content, 'html.parser')
-        pdf_links = []
-        for a in soup.find_all("a", href=True):
-            href_lower = a['href'].lower()
-            if href_lower.startswith(('mailto:', 'javascript:', 'tel:', '#')): continue
-            if "acrobat" in href_lower or "get.adobe" in href_lower: continue 
-            if ".pdf" in href_lower or "download" in href_lower or "attachment" in href_lower or "/media/" in href_lower:
-                pdf_links.append(urljoin(url, a['href']))
+                for pdf_url in pdf_links:
+                    try:
+                        pdf_res = requests.get(pdf_url, headers=headers, timeout=30)
+                        pdf_content = None
+                        if pdf_res.status_code == 200 and pdf_res.content.startswith(b"%PDF"):
+                            pdf_content = pdf_res.content
+                        else:
+                            pdf_content = fetch_binary_with_scraperapi(pdf_url)
 
-        for pdf_url in pdf_links:
-            try:
-                pdf_res = requests.get(pdf_url, headers=headers, timeout=30)
-                pdf_content = None
-                if pdf_res.status_code == 200 and pdf_res.content.startswith(b"%PDF"):
-                    pdf_content = pdf_res.content
-                else:
-                    pdf_content = fetch_binary_with_scraperapi(pdf_url)
+                        if pdf_content and pdf_content.startswith(b"%PDF"):
+                            doc = fitz.open(stream=pdf_content, filetype="pdf")
+                            text = "".join(page.get_text() for page in doc)
+                            if len(text.strip()) > 50: 
+                                raw_text = text
+                                break
+                            ocr_text = extract_text_with_ocr(pdf_content)
+                            if not ocr_text.startswith("추출 불가"): 
+                                raw_text = ocr_text
+                                break
+                    except Exception:
+                        continue 
 
-                if pdf_content and pdf_content.startswith(b"%PDF"):
-                    doc = fitz.open(stream=pdf_content, filetype="pdf")
-                    text = "".join(page.get_text() for page in doc)
-                    if len(text.strip()) > 50: return text
-                    ocr_text = extract_text_with_ocr(pdf_content)
-                    if not ocr_text.startswith("추출 불가"): return ocr_text
-            except Exception:
-                continue 
-
-        for tag in soup(["script", "style", "nav", "footer", "header", "noscript", "aside"]):
-            tag.extract()
-        
-        main_content = soup.find('main') or soup.find('article') or soup.find('div', class_=re.compile(r'govspeak|main-content|content|mws-body|page-body|container'))
-        html_text = main_content.get_text(separator='\n', strip=True) if main_content else soup.body.get_text(separator='\n', strip=True) if soup.body else ""
-        
-        if len(html_text.strip()) > 100: return html_text
-        return "추출 불가: HTML 본문 부족"
+                if not raw_text:
+                    for tag in soup(["script", "style", "nav", "footer", "header", "noscript", "aside"]):
+                        tag.extract()
+                    
+                    main_content = soup.find('main') or soup.find('article') or soup.find('div', class_=re.compile(r'govspeak|main-content|content|mws-body|page-body|container'))
+                    html_text = main_content.get_text(separator='\n', strip=True) if main_content else soup.body.get_text(separator='\n', strip=True) if soup.body else ""
+                    
+                    if len(html_text.strip()) > 100: 
+                        raw_text = html_text
+                    else:
+                        raw_text = "추출 불가: HTML 본문 부족"
+                        
     except Exception as e:
-        return f"추출 불가: 예외 발생 ({e})"
+        raw_text = f"추출 불가: 예외 발생 ({e})"
+        
+    # [핵심 수정] PostgreSQL DB 저장 전 Null Byte 및 제어 문자 강제 제거
+    if raw_text:
+        raw_text = raw_text.replace('\x00', '').replace('\u0000', '')
+    
+    return raw_text
 
 def get_crawler_configs():
     try:
@@ -204,7 +222,7 @@ def discover_guidelines(agency, start_url, keywords, current_depth=0, max_depth=
 
 def backfill_missing_texts():
     print("\n--- 기존 DB 문서 중 raw_text 누락 건 텍스트 추출 작업 ---")
-    missing_docs = supabase.table("guidelines").select("url").or_("raw_text.is.null").execute().data
+    missing_docs = supabase.table("guidelines").select("url").is_("raw_text", "null").execute().data
     if not missing_docs:
         print("누락된 텍스트가 없습니다.")
         return
@@ -214,7 +232,10 @@ def backfill_missing_texts():
         url = doc['url']
         print(f" -> 텍스트 추출 시도: {url}")
         raw_text = extract_content_robust(url)
-        supabase.table("guidelines").update({"raw_text": raw_text}).eq("url", url).execute()
+        try:
+            supabase.table("guidelines").update({"raw_text": raw_text}).eq("url", url).execute()
+        except Exception as e:
+            print(f"    - DB 업데이트 오류: {e}")
         time.sleep(1)
 
 def save_to_supabase(guidelines):
@@ -246,10 +267,8 @@ def save_to_supabase(guidelines):
     print(f"최종 {success_count} 건 신규 저장 완료.")
 
 if __name__ == "__main__":
-    # 1. DB 상의 기존 문서 텍스트 보완 작업 선행
     backfill_missing_texts()
 
-    # 2. 신규 가이드라인 탐색
     configs = get_crawler_configs()
     if not configs:
         configs = [
@@ -276,5 +295,4 @@ if __name__ == "__main__":
         docs = discover_guidelines(agency, start_url, keywords)
         all_collected_docs.extend(docs)
 
-    # 3. 추출된 텍스트와 함께 DB 저장
     save_to_supabase(all_collected_docs)
