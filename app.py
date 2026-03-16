@@ -285,7 +285,7 @@ def main():
             edited_df = st.data_editor(
                 df_for_selection, hide_index=True,
                 column_config={"비교 선택": st.column_config.CheckboxColumn("비교 선택", default=False), "url": None},
-                disabled=["상태", "title", "agency", "category"], use_container_width=True
+                disabled=["agency", "category", "title", "상태"], use_container_width=True
             )
             
             selected_rows = edited_df[edited_df["비교 선택"]]
