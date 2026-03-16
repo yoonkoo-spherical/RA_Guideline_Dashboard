@@ -80,9 +80,11 @@ def process_raw_content(content_bytes, content_type, url):
         for tag in soup(["script", "style", "nav", "footer", "header", "noscript", "aside"]): 
             tag.extract()
             
-        main_content = soup.find('main') or soup.find('article') or soup.find('div', class_=re.compile(r'govspeak|main-content|content'))
+        main_content = soup.find('main') or soup.find('article') or soup.find('div', class_=re.compile(r'govspeak|main-content|content|mws-body|page-body|container'))
         html_text = main_content.get_text(separator='\n', strip=True) if main_content else soup.body.get_text(separator='\n', strip=True) if soup.body else ""
-        return html_text if len(html_text.strip()) > 200 else None
+        
+        # analyzer.py와의 추출 기준 정합성을 위해 200자에서 100자로 완화
+        return html_text if len(html_text.strip()) > 100 else None
 
     if "application/json" in content_type or content_bytes.strip().startswith(b"{"):
         try:
@@ -117,7 +119,10 @@ def extract_content_robust(url):
         return "추출 불가"
 
 def clean_and_chunk_text(text, chunk_size=1000, overlap=100):
+    # Null Byte(\x00) 및 제어 문자 제거 (PostgreSQL 에러 방지)
+    text = text.replace('\x00', '').replace('\u0000', '')
     text = re.sub(r'\s+', ' ', text).strip()
+    
     chunks = []
     for i in range(0, len(text), chunk_size - overlap):
         chunk = text[i:i + chunk_size]
@@ -155,6 +160,8 @@ def process_embeddings():
         print(f" -> {len(chunks)} 개의 청크로 분할 완료. 임베딩 시작...")
 
         success = True
+        batch_records = [] # DB 일괄 저장을 위한 리스트 선언
+        
         for i, chunk in enumerate(chunks):
             try:
                 response = client.models.embed_content(
@@ -163,23 +170,35 @@ def process_embeddings():
                 )
                 embedding_vector = response.embeddings[0].values
                 
-                supabase.table("document_chunks").insert({
+                # 개별 삽입 대신 batch_records 리스트에 임베딩 결과 적재
+                batch_records.append({
                     "url": target_doc["url"],
                     "chunk_index": i,
                     "content": chunk,
                     "embedding": embedding_vector
-                }).execute()
+                })
                 
-                print(f"   - Chunk {i+1}/{len(chunks)} 저장 완료")
-                time.sleep(1)
+                print(f"   - Chunk {i+1}/{len(chunks)} 임베딩 추출 완료")
+                
+                # API Limit 고려, 대기 시간을 1초에서 0.1초로 대폭 단축
+                time.sleep(0.1)
                 
             except Exception as e:
-                print(f"   - Chunk {i+1} 임베딩 실패: {e}")
+                print(f"   - Chunk {i+1} API 호출 실패: {e}")
                 success = False
                 break 
 
+        # API 호출이 모두 성공했고 저장할 청크가 존재하는 경우 Bulk Insert 실행
+        if success and batch_records:
+            try:
+                supabase.table("document_chunks").insert(batch_records).execute()
+                print(f" -> {len(batch_records)}개 청크 DB 일괄 저장 완료 🟢")
+            except Exception as db_e:
+                print(f" -> DB 일괄 저장 중 오류 발생: {db_e}")
+                success = False
+
         if not success:
-            print(" -> 임베딩 오류 발생. 불완전한 청크 삭제(롤백) 처리.")
+            print(" -> 임베딩 또는 DB 저장 오류 발생. 불완전한 청크 삭제(롤백) 처리 🔴")
             supabase.table("document_chunks").delete().eq("url", target_doc["url"]).execute()
 
     print("\n -> 배치 임베딩 작업 종료")
