@@ -1,12 +1,14 @@
-name: Daily Guideline Scraper
+name: Guideline Pipeline
 
 on:
   schedule:
-    - cron: '0 15 * * *' # KST 기준 매일 00:00
-  workflow_dispatch:
+    - cron: '0 15 * * *' # KST 기준 매일 00:00 (정기 크롤링)
+  workflow_dispatch:     # app.py 수동 업로드 시 트리거 (전체 파이프라인)
 
 jobs:
-  scrape-and-update:
+  # 1. 정기 스케줄 구동 (scraper.py만 실행)
+  scheduled-scraping:
+    if: github.event_name == 'schedule'
     runs-on: ubuntu-latest
 
     steps:
@@ -35,3 +37,54 @@ jobs:
           SCRAPER_API_KEY: ${{ secrets.SCRAPER_API_KEY }}
         run: |
           python scraper.py
+
+
+  # 2. 수동 업로드 트리거 구동 (전체 파이프라인 실행)
+  manual-upload-pipeline:
+    if: github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: 저장소 코드 불러오기 (Checkout repo)
+        uses: actions/checkout@v4
+
+      - name: 시스템 의존성 패키지 설치 (OCR 및 PDF 처리용)
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y tesseract-ocr tesseract-ocr-eng tesseract-ocr-kor poppler-utils
+
+      - name: 파이썬 환경 설정 (Set up Python)
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.10'
+
+      - name: 필요 패키지 설치 (Install dependencies)
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+
+      - name: Step 1. Scraper 실행 (텍스트 추출)
+        env:
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          SUPABASE_KEY: ${{ secrets.SUPABASE_KEY }}
+          SCRAPER_API_KEY: ${{ secrets.SCRAPER_API_KEY }}
+        run: |
+          python scraper.py
+
+      - name: Step 2. Analyzer 실행 (요약문 생성)
+        env:
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          SUPABASE_KEY: ${{ secrets.SUPABASE_KEY }}
+          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+          SMTP_EMAIL: ${{ secrets.SMTP_EMAIL }}
+          SMTP_PASSWORD: ${{ secrets.SMTP_PASSWORD }}
+        run: |
+          python analyzer.py
+
+      - name: Step 3. Embedder 실행 (벡터 DB 적재)
+        env:
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          SUPABASE_KEY: ${{ secrets.SUPABASE_KEY }}
+          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+        run: |
+          python embedder.py
