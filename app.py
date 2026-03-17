@@ -7,6 +7,7 @@ import markdown
 from datetime import datetime, timedelta
 from collections import defaultdict
 import re
+import requests
 
 @st.cache_resource
 def init_connection():
@@ -454,7 +455,7 @@ def main():
 
     with tab_upload:
         st.markdown("#### 📤 로컬 PDF 가이드라인 업로드")
-        st.write("PC 환경의 가이드라인 문서를 직접 업로드하여 데이터베이스에 추가합니다.")
+        st.write("PC 환경의 가이드라인 문서를 직접 업로드하여 데이터베이스에 추가하고, 분석 파이프라인을 즉시 가동합니다.")
         
         col1, col2 = st.columns(2)
         with col1:
@@ -464,9 +465,34 @@ def main():
             
         uploaded_file = st.file_uploader("PDF 파일 선택 (드래그 앤 드롭 가능)", type="pdf")
         
-        if st.button("데이터베이스 추가 및 분석 대기열 등록", type="primary"):
+        def trigger_github_workflow():
+            try:
+                github_token = st.secrets.get("GITHUB_TOKEN")
+                github_repo = st.secrets.get("GITHUB_REPO")
+                
+                if not github_token or not github_repo:
+                    return False, "GitHub 환경변수(Token/Repo)가 설정되지 않았습니다."
+                
+                url = f"https://api.github.com/repos/{github_repo}/actions/workflows/schedule.yml/dispatches"
+                headers = {
+                    "Accept": "application/vnd.github+json",
+                    "Authorization": f"Bearer {github_token}",
+                    "X-GitHub-Api-Version": "2022-11-28"
+                }
+                data = {"ref": "main"}
+                
+                response = requests.post(url, headers=headers, json=data)
+                
+                if response.status_code == 204:
+                    return True, "성공"
+                else:
+                    return False, f"API 거부: {response.status_code} - {response.text}"
+            except Exception as e:
+                return False, str(e)
+
+        if st.button("데이터베이스 추가 및 분석 파이프라인 가동", type="primary"):
             if uploaded_file is not None and category_input:
-                with st.spinner("파일을 서버에 업로드하고 있습니다..."):
+                with st.spinner("파일 업로드 및 파이프라인을 호출하는 중입니다..."):
                     file_name = uploaded_file.name
                     file_bytes = uploaded_file.read()
                     try:
@@ -477,13 +503,19 @@ def main():
                             "title": file_name,
                             "agency": agency_input,
                             "category": category_input,
-                            "url": file_url,
-                            "ai_summary": None 
+                            "url": file_url
                         }).execute()
-                        st.success("데이터베이스 추가 성공! 백그라운드 시스템이 요약 및 임베딩을 순차적으로 진행합니다.")
+                        st.success("데이터베이스 추가 완료!")
+                        
+                        trigger_success, trigger_msg = trigger_github_workflow()
+                        if trigger_success:
+                            st.info("✅ 백그라운드 분석 파이프라인(텍스트 추출 ➡️ 요약 ➡️ 임베딩)이 시작되었습니다. 작업 완료 시 대시보드에 자동으로 반영됩니다.")
+                        else:
+                            st.warning(f"⚠️ 파이프라인 즉시 호출에 실패했습니다. (매일 자정 정기 스케줄에 의해 일괄 처리됩니다): {trigger_msg}")
+                            
                     except Exception as e:
                         if "Duplicate" in str(e):
-                            st.error("이미 동일한 이름의 파일이 스토리지에 존재합니다. 파일명을 변경 후 다시 시도하십시오.")
+                            st.error("이미 동일한 이름의 파일이 존재합니다. 파일명을 변경 후 다시 시도하십시오.")
                         else:
                             st.error(f"업로드 에러: {e}")
             else:
