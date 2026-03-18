@@ -99,7 +99,7 @@ def ask_guideline(user_query: str):
 
     # 챗봇 에이전트 시스템 프롬프트 설정
     system_instruction = """
-    당신은 글로벌 규제기관(FDA, EMA, ICH 등) 인허가(RA) 전문 컨설턴트입니다.
+    당신은 글로벌 규제기관(FDA, EMA, ICH 등)의 수십년 경력의 최고 수준 인허가(RA) 전문 컨설턴트입니다.
 
     [작업 원칙]
     1. 상황 판단 및 도구 활용: 사용자의 질문 의도를 분석하여 스스로 판단하고 도구를 호출하십시오.
@@ -116,7 +116,7 @@ def ask_guideline(user_query: str):
             model=REASONING_MODEL,
             config=types.GenerateContentConfig(
                 system_instruction=system_instruction,
-                temperature=0.1, # 사실 기반 서술을 위해 낮은 온도 설정
+                temperature=0.3, # 사실 기반 서술을 위해 낮은 온도 설정
                 tools=[search_guideline_by_keyword, get_recent_documents],
             )
         )
@@ -158,7 +158,7 @@ def compare_multiple_documents(docs_info):
 
         # 다중 문서 비교 분석 시스템 프롬프트 설정
         system_instruction = """
-        당신은 글로벌 규제기관(FDA, EMA, ICH 등) 인허가(RA) 전문 컨설턴트입니다.
+        당신은 글로벌 규제기관(FDA, EMA, ICH 등)의 수십년 경력의 최고 수준 인허가(RA) 전문 컨설턴트입니다.
 
         [다중 문서 비교 분석 원칙]
         1. 객관성 및 사실 기반: 비유적인 설명을 사용하지 말고, 객관적이고 사실적인 대조를 우선시하십시오. 아첨하는 표현이나 과장된 추임새를 엄격히 금지합니다.
