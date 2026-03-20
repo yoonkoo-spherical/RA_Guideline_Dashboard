@@ -10,14 +10,12 @@ import json
 from google import genai
 from google.genai import types
 
-# 환경 변수 로드 (로컬 실행 시 .env 참조, GitHub Actions 실행 시 OS 환경 변수 참조)
 load_dotenv()
 
 SUPABASE_URL = os.getenv("SUPABASE_URL")
 SUPABASE_KEY = os.getenv("SUPABASE_KEY")
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
 
-# 구글 검색 API 및 맞춤검색 엔진 환경 변수
 GOOGLE_SEARCH_API_KEY = os.getenv("GOOGLE_SEARCH_API_KEY")
 GOOGLE_SEARCH_CX = os.getenv("GOOGLE_SEARCH_CX")
 
@@ -30,8 +28,12 @@ except Exception as e:
 client = genai.Client(api_key=GEMINI_API_KEY)
 FILTER_MODEL = "gemini-3.1-flash"
 
+# 규제 기관 봇 차단 방어용 헤더
+REQUEST_HEADERS = {
+    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+}
+
 def extract_text_with_ocr(pdf_bytes):
-    """PDF 바이트에서 텍스트를 추출하며, 실패 시 OCR을 시도합니다."""
     try:
         text = ""
         doc = fitz.open(stream=pdf_bytes, filetype="pdf")
@@ -41,7 +43,6 @@ def extract_text_with_ocr(pdf_bytes):
         if text.strip():
             return text
             
-        # 텍스트가 없으면 OCR 수행
         images = convert_from_bytes(pdf_bytes)
         text = "".join(pytesseract.image_to_string(img, lang='eng+kor') for img in images)
         return text if text.strip() else "추출 불가: OCR 실패"
@@ -49,7 +50,6 @@ def extract_text_with_ocr(pdf_bytes):
         return "추출 불가"
 
 def search_agency_guidelines(agency, site_domain):
-    """구글 검색 API를 사용하여 특정 기관의 바이오시밀러/mAb PDF 문서를 검색합니다."""
     if not GOOGLE_SEARCH_API_KEY or not GOOGLE_SEARCH_CX:
         print("구글 검색 API 환경 변수가 설정되지 않았습니다.")
         return []
@@ -60,11 +60,11 @@ def search_agency_guidelines(agency, site_domain):
         'key': GOOGLE_SEARCH_API_KEY,
         'cx': GOOGLE_SEARCH_CX,
         'q': query,
-        'num': 10  # 상위 10개 추출
+        'num': 10
     }
 
     try:
-        response = requests.get(url, params=params)
+        response = requests.get(url, params=params, timeout=30)
         response.raise_for_status()
         search_results = response.json().get('items', [])
         
@@ -77,12 +77,17 @@ def search_agency_guidelines(agency, site_domain):
                 "url": item.get('link', '')
             })
         return extracted_links
+    except requests.exceptions.HTTPError as e:
+        # 구글 API 403 에러의 상세 원인(JSON)을 출력하도록 개선
+        error_details = e.response.text
+        print(f"{agency} 검색 API HTTP 오류 발생: {e.response.status_code}")
+        print(f"상세 오류 메시지: {error_details}")
+        return []
     except Exception as e:
-        print(f"{agency} 검색 API 호출 중 오류 발생: {e}")
+        print(f"{agency} 검색 중 일반 오류 발생: {e}")
         return []
 
 def filter_links_with_llm(links):
-    """Gemini Flash 모델을 사용하여 수집된 링크 중 가이드라인 성격에 부합하는 문서만 필터링합니다."""
     if not links:
         return []
 
@@ -116,7 +121,6 @@ def filter_links_with_llm(links):
     return valid_links
 
 def download_and_save_pdf(doc_info):
-    """URL에서 PDF를 다운로드하고 텍스트를 추출하여 데이터베이스에 저장합니다."""
     url = doc_info['url']
     
     existing = supabase.table("guidelines").select("url").eq("url", url).execute()
@@ -126,7 +130,8 @@ def download_and_save_pdf(doc_info):
 
     print(f" - 다운로드 시도: {url}")
     try:
-        res = requests.get(url, timeout=30)
+        # 다운로드 시 User-Agent 헤더를 포함하여 기관 서버의 봇 차단 방어
+        res = requests.get(url, headers=REQUEST_HEADERS, timeout=30)
         res.raise_for_status()
         pdf_bytes = res.content
         
@@ -141,8 +146,10 @@ def download_and_save_pdf(doc_info):
         }).execute()
         print(f" - DB 저장 완료: {doc_info['title']}")
         
+    except requests.exceptions.HTTPError as e:
+        print(f" - 다운로드 거부(HTTP Error) ({url}): {e.response.status_code}")
     except Exception as e:
-        print(f" - 다운로드 또는 저장 실패({url}): {e}")
+        print(f" - 다운로드 또는 저장 실패 ({url}): {e}")
 
 def run_scraper():
     print("--- 지능형 가이드라인 수집기 시작 ---")
