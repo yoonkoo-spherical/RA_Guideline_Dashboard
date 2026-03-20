@@ -479,7 +479,10 @@ def main():
                     "Authorization": f"Bearer {github_token}",
                     "X-GitHub-Api-Version": "2022-11-28"
                 }
-                data = {"ref": "main"}
+                data = {
+                    "ref": "main"
+                    "inputs": {"skip_scraping": "true"}                
+                }
                 
                 response = requests.post(url, headers=headers, json=data)
                 
