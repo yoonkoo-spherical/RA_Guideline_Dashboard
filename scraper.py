@@ -50,6 +50,7 @@ def extract_text_with_ocr(pdf_bytes):
         return "추출 불가"
 
 def search_agency_guidelines(agency, site_domain):
+    print(f"현재 로드된 API KEY 앞 5자리: {GOOGLE_SEARCH_API_KEY[:5]}***") # 추가
     if not GOOGLE_SEARCH_API_KEY or not GOOGLE_SEARCH_CX:
         print("구글 검색 API 환경 변수가 설정되지 않았습니다.")
         return []
