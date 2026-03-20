@@ -105,7 +105,11 @@ def process_embeddings():
 
         if success and batch_records:
             try:
-                supabase.table("document_chunks").insert(batch_records).execute()
+                batch_size = 100  # 한 번에 전송할 데이터 개수 제한
+                for j in range(0, len(batch_records), batch_size):
+                    chunk_batch = batch_records[j:j + batch_size]
+                    supabase.table("document_chunks").insert(chunk_batch).execute()
+                    time.sleep(0.5)  # DB 부하 방지를 위한 짧은 대기
                 print(f" -> {len(batch_records)}개 청크 DB 일괄 저장 완료 🟢")
             except Exception as db_e:
                 print(f" -> DB 일괄 저장 중 오류 발생: {db_e}")
