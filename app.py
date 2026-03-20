@@ -480,7 +480,7 @@ def main():
                     "X-GitHub-Api-Version": "2022-11-28"
                 }
                 data = {
-                    "ref": "main"
+                    "ref": "main",
                     "inputs": {"skip_scraping": "true"}                
                 }
                 
