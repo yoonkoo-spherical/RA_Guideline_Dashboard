@@ -1,4 +1,5 @@
 import os
+import json
 from google import genai
 from google.genai import types
 from supabase import create_client, Client
@@ -20,9 +21,10 @@ except Exception as e:
 client = genai.Client(api_key=GEMINI_API_KEY)
 
 REASONING_MODEL = "gemini-3.1-pro-preview"
+FAST_MODEL = "gemini-3.1-flash"
 EMBEDDING_MODEL = "gemini-embedding-001"
 
-# 비용 최적화를 위한 토큰 관리 상수 (다중 문서 비교 시 동적 절사 용도)
+# 비용 최적화를 위한 토큰 관리 상수
 MAX_TOTAL_CHARS = 250000 
 
 def get_embedding(text: str):
@@ -34,57 +36,118 @@ def get_embedding(text: str):
         print(f"Embedding error: {e}")
         return None
 
+def expand_query(user_query: str) -> list[str]:
+    """사용자 질문을 다각도의 쿼리로 확장하여 DB 검색 누락을 방지합니다."""
+    prompt = f"""
+    다음 바이오시밀러 규제 관련 질문을 데이터베이스 검색에 적합한 3개의 다른 키워드 조합으로 변환하십시오.
+    동의어, 전문 용어, 관련 규제 기관(FDA, EMA, MFDS 등)의 영문 약어를 포함하십시오.
+    결과는 JSON 배열 형태의 문자열 리스트로만 출력하십시오.
+    원본 질문: {user_query}
+    """
+    try:
+        response = client.models.generate_content(
+            model=FAST_MODEL,
+            contents=prompt,
+            config=types.GenerateContentConfig(temperature=0.1, response_mime_type="application/json")
+        )
+        expanded_queries = json.loads(response.text)
+        expanded_queries.append(user_query) # 원본 질문 포함
+        return list(set(expanded_queries))
+    except Exception as e:
+        print(f"Query Expansion Error: {e}")
+        return [user_query]
+
+def rerank_chunks(user_query: str, chunks: list[dict], top_n: int = 10) -> list[dict]:
+    """검색된 청크들을 질문과의 실제 연관성 기준으로 재정렬합니다."""
+    if not chunks:
+        return []
+    
+    # 평가를 위한 프롬프트 구성
+    chunks_text = "\n".join([f"[{i}] {c.get('content', '')[:200]}..." for i, c in enumerate(chunks)])
+    prompt = f"""
+    질문: {user_query}
+    다음 검색된 문서 청크들 중 질문에 답변하는 데 가장 관련성이 높은 청크의 번호(인덱스)를 연관성 순으로 최대 {top_n}개까지 나열하십시오.
+    결과는 JSON 배열(숫자 리스트) 형식으로만 출력하십시오.
+    
+    청크 목록:
+    {chunks_text}
+    """
+    try:
+        response = client.models.generate_content(
+            model=FAST_MODEL,
+            contents=prompt,
+            config=types.GenerateContentConfig(temperature=0.0, response_mime_type="application/json")
+        )
+        top_indices = json.loads(response.text)
+        return [chunks[i] for i in top_indices if i < len(chunks)]
+    except Exception as e:
+        print(f"Reranking Error: {e}")
+        return chunks[:top_n]
+
 def ask_guideline(user_query: str):
     """
-    사용자의 질문 의도를 파악하여 적절한 검색 도구를 선택하고, 
-    결과 및 전문 지식을 종합하여 답변을 생성하는 지능형 에이전트 함수입니다.
+    사용자의 질문 의도를 파악하여 하이브리드 검색 및 외부 웹 검색을 수행하고,
+    결과를 종합하여 최고 수준의 RA 전문 답변을 생성합니다.
     """
-    # 에이전트가 도구를 사용할 때마다 참조한 문서의 URL을 수집하는 리스트
     accessed_sources = []
 
-    # 도구 1: 의미 기반 벡터 검색
-    def search_guideline_by_keyword(query: str) -> str:
+    def search_guideline_hybrid(query: str) -> str:
         """
-        가이드라인 문서의 구체적인 내용, 규제 기준, 실무 지침 등을 의미(Semantic) 기반으로 검색합니다.
-        사용자가 특정 규제 요건, 가이드라인의 세부 내용, 기준의 차이점 등을 물어볼 때 사용합니다.
+        벡터 유사도와 키워드(BM25) 검색을 결합한 하이브리드 검색을 수행하고, 결과를 재정렬합니다.
         """
-        query_embedding = get_embedding(query)
-        if not query_embedding:
-            return "시스템 오류: 쿼리 임베딩 생성에 실패했습니다."
+        queries = expand_query(query)
+        all_docs_map = {} # 중복 제거용 딕셔너리
 
-        try:
-            # 매치 수를 15로 유지하여 충분한 문맥 확보
-            search_res = supabase.rpc("match_document_chunks", {
-                "query_embedding": query_embedding,
-                "match_threshold": 0.5,
-                "match_count": 15
-            }).execute()
-            docs = search_res.data
-        except Exception as rpc_e:
-            print(f"RPC Search Error: {rpc_e}")
-            return "데이터베이스 검색 중 오류가 발생했습니다."
+        for q in queries:
+            # 1. Vector Search (의미 기반)
+            query_embedding = get_embedding(q)
+            if query_embedding:
+                try:
+                    search_res = supabase.rpc("match_document_chunks", {
+                        "query_embedding": query_embedding,
+                        "match_threshold": 0.4, # 기준을 다소 낮추어 누락 방지
+                        "match_count": 15
+                    }).execute()
+                    
+                    for d in search_res.data:
+                        all_docs_map[d['id']] = d
+                except Exception as e:
+                    print(f"Vector Search Error: {e}")
 
-        if not docs:
-            return "제공된 데이터베이스 내에서 해당 키워드와 일치하는 문서 내용을 찾을 수 없습니다."
+            # 2. Keyword Search (단어/규정 번호 기반 누락 방지)
+            # 주의: Supabase에 'content' 컬럼 대상의 FTS(Full Text Search)가 구성되어 있어야 가장 효과적입니다.
+            try:
+                # 띄어쓰기 기준으로 키워드 추출하여 텍스트 검색 (간이 형태)
+                keywords = " | ".join(q.split()) 
+                text_res = supabase.table("document_chunks").select("*").textSearch("content", keywords).limit(10).execute()
+                for d in text_res.data:
+                    all_docs_map[d.get('id', d['url'])] = d
+            except Exception as e:
+                print(f"Text Search Error: {e}")
+
+        unique_docs = list(all_docs_map.values())
+        
+        # 3. Context Re-ranking
+        reranked_docs = rerank_chunks(query, unique_docs, top_n=12)
+
+        if not reranked_docs:
+            return "제공된 내부 데이터베이스 내에서 관련 문서를 찾을 수 없습니다."
 
         context_chunks = []
-        for d in docs:
+        for d in reranked_docs:
             accessed_sources.append({"url": d['url']})
-            context_chunks.append(f"- 내용: {d.get('content', '')}")
+            # Semantic Chunking 메타데이터(section, clause 등)가 DB에 존재할 경우를 고려한 포맷팅
+            section_info = f" (섹션: {d.get('section', 'N/A')}, 조항: {d.get('clause', 'N/A')})" if 'section' in d else ""
+            context_chunks.append(f"-[출처: {d.get('url')}{section_info}]\n내용: {d.get('content', '')}")
             
         return "\n\n".join(context_chunks)
 
-    # 도구 2: 메타데이터 기반 최신 문서 조회
     def get_recent_documents(limit: int = 5) -> str:
-        """
-        가장 최근에 데이터베이스에 추가되거나 업데이트된 가이드라인 문서 목록을 날짜순으로 조회합니다.
-        사용자가 '최근 문서', '최신 가이드라인', '업데이트 내역' 등 시간/현황과 관련된 질문을 할 때 사용합니다.
-        """
+        """최근에 등록된 가이드라인 문서를 조회합니다."""
         try:
             res = supabase.table("guidelines").select("title, agency, category, url, created_at").order("created_at", desc=True).limit(limit).execute()
             docs = res.data
         except Exception as e:
-            print(f"SQL Select Error: {e}")
             return "최근 문서 목록을 조회하는 중 오류가 발생했습니다."
 
         if not docs:
@@ -97,34 +160,41 @@ def ask_guideline(user_query: str):
             
         return "\n".join(context_chunks)
 
-    # 챗봇 에이전트 시스템 프롬프트 설정
+    # RA 30년차 최고 전문가 시스템 프롬프트
     system_instruction = """
-    당신은 글로벌 규제기관(FDA, EMA, ICH 등)의 수십년 경력의 최고 수준 인허가(RA) 전문 컨설턴트입니다.
+    당신은 글로벌 바이오시밀러 제약사에서 30년 이상의 경력을 쌓은 최고 수준의 인허가(RA) 전문 컨설턴트입니다. FDA, EMA, MFDS, ICH 가이드라인과 실무 적용 사례의 미세한 맥락에 완벽히 정통합니다.
 
     [작업 원칙]
-    1. 상황 판단 및 도구 활용: 사용자의 질문 의도를 분석하여 스스로 판단하고 도구를 호출하십시오.
-       - 세부 규제 내용, 기준, 차이점 문의 -> `search_guideline_by_keyword` 호출
-       - 시스템에 등록된 최신 문서, 전체 목록 등 현황 문의 -> `get_recent_documents` 호출
-    2. 사실관계 위주 작성: 비유적인 설명을 사용하지 말고, 객관적이고 사실적인 설명을 우선시하십시오. 아첨하는 표현이나 과장된 추임새를 엄격히 금지합니다.
-    3. 지식의 보완 (Knowledge Bridging): 도구 검색 결과에 명시된 내용이 없거나 부족한 경우, "제공된 데이터베이스에는 해당 내용이 명시되어 있지 않으나, 일반적인 글로벌 규제 동향에 따르면..." 이라고 한계를 객관적으로 밝힌 후, 귀하의 최고 수준 RA 전문 지식을 활용하여 사실에 근거한 상세한 답변을 제공하십시오.
-    4. 형식: 한국어 존댓말을 사용하며, 정보의 체계적 전달을 위해 마크다운(글머리 기호, 표 등)을 적절히 활용하십시오.
+    1. 상황 판단 및 도구 활용: 사용자의 질문을 분석하여 내부 DB 검색(`search_guideline_hybrid`)을 우선 수행하십시오.
+    2. 객관성과 사실 기반: 비유, 과장, 아첨, 불필요한 추임새를 엄격히 금지합니다. 규제 조항과 과학적 사실에 근거하여 담백하고 매우 전문적인 수준으로 답변하십시오.
+    3. 정보 출처의 엄격한 분리 및 보완:
+       - **[DB 참조]**: `search_guideline_hybrid`를 통해 도출된 내부 데이터베이스 정보.
+       - **[웹/외부 참조]**: 내부 DB에 정보가 부족하거나 최신 동향 파악이 필요한 경우, 통합된 'Google 웹 검색 도구'를 활용하여 정보를 보완하십시오.
+       - 답변 작성 시 위 두 출처를 마크다운 태그를 활용해 시각적으로 명확히 분리하십시오. 출처 충돌 시 내부 DB 문서를 우선 기준으로 삼고, 웹 검색 결과는 실무적 보충 설명으로만 활용하십시오.
+    4. 자동 출처 표기 (Citation): DB 정보를 인용할 때, 제공된 검색 결과의 메타데이터(문서명, 섹션, 조항)를 추출하여 문장 끝에 명시하십시오. (예: [문서명, 제X조 제Y항])
+    5. 맥락 파악 및 실무적 통찰: 단순 번역이나 요약을 넘어, 조항 간의 모순점, 실제 바이오시밀러 개발/승인 시 마주치는 Risk, 그리고 30년 경력자 수준의 보수적인 권고사항을 객관적으로 분석하십시오.
+    6. 언어: 한국어 존댓말을 사용하며, 표와 글머리 기호를 활용하여 구조적으로 서술하십시오.
     """
 
     try:
-        # Function Calling을 지원하는 챗 세션 생성
+        # Google 웹 검색 도구를 설정하여 DB 검색 도구와 동시 활용 가능하도록 구성
+        tools = [
+            search_guideline_hybrid, 
+            get_recent_documents, 
+            types.Tool(google_search=types.GoogleSearch())
+        ]
+
         chat = client.chats.create(
             model=REASONING_MODEL,
             config=types.GenerateContentConfig(
                 system_instruction=system_instruction,
-                temperature=0.3, # 사실 기반 서술을 위해 낮은 온도 설정
-                tools=[search_guideline_by_keyword, get_recent_documents],
+                temperature=0.1, # 사실 기반 및 보수적 서술을 위해 온도 최소화
+                tools=tools,
             )
         )
         
-        # 모델이 질문을 분석하고, 필요한 도구를 자동 실행한 뒤 최종 답변을 생성
         response = chat.send_message(user_query)
         
-        # 에이전트가 도구 실행 중 누적한 URL 리스트의 중복 제거
         unique_sources = []
         seen_urls = set()
         for source in accessed_sources:
@@ -138,43 +208,49 @@ def ask_guideline(user_query: str):
         return f"답변 생성 중 오류가 발생했습니다: {str(e)}", []
 
 
-def compare_multiple_documents(docs_info):
+def compare_multiple_documents(docs_info, user_query: str = "위 문서들을 종합적이고 심층적으로 비교 분석하십시오."):
     """
-    선택된 다수의 가이드라인 문서를 객관적으로 대조하고 심층 분석합니다.
+    선택된 다수의 가이드라인 문서를 객관적으로 대조하고 웹 검색을 통해 심층 분석을 보완합니다.
     """
     try:
         docs_text = ""
         doc_count = len(docs_info)
 
-        # 문서 개수에 따라 동적으로 할당량을 분할하여 토큰 한도 초과 방지
         chars_per_doc = (MAX_TOTAL_CHARS - 10000) // doc_count if doc_count > 0 else MAX_TOTAL_CHARS
 
         for i, doc in enumerate(docs_info):
-            chunk_res = supabase.table("document_chunks").select("content").eq("url", doc['url']).order("chunk_index").execute()
-            full_text = " ".join([c['content'] for c in chunk_res.data])
+            chunk_res = supabase.table("document_chunks").select("content", "section", "clause").eq("url", doc['url']).order("chunk_index").execute()
+            
+            doc_chunks = []
+            for c in chunk_res.data:
+                # Semantic Chunking을 고려한 메타데이터 포함
+                meta = f"[섹션: {c.get('section', 'N/A')}, 조항: {c.get('clause', 'N/A')}] "
+                doc_chunks.append(meta + c['content'])
 
+            full_text = " ".join(doc_chunks)
             truncated_text = full_text[:chars_per_doc]
             docs_text += f"\n\n--- [문서 {i+1}: {doc.get('title', 'Unknown')} ({doc.get('agency', 'N/A')})] ---\n{truncated_text}" 
 
-        # 다중 문서 비교 분석 시스템 프롬프트 설정
         system_instruction = """
-        당신은 글로벌 규제기관(FDA, EMA, ICH 등)의 수십년 경력의 최고 수준 인허가(RA) 전문 컨설턴트입니다.
+        당신은 글로벌 바이오시밀러 제약사에서 30년 이상의 경력을 쌓은 최고 수준의 인허가(RA) 전문 컨설턴트입니다.
 
         [다중 문서 비교 분석 원칙]
-        1. 객관성 및 사실 기반: 비유적인 설명을 사용하지 말고, 객관적이고 사실적인 대조를 우선시하십시오. 아첨하는 표현이나 과장된 추임새를 엄격히 금지합니다.
-        2. 문서 기반 대조: 제공된 [분석 대상 문서들]의 텍스트를 바탕으로 요구 자료의 수준, 용어 정의, 실무적 기준점 차이를 명확하고 담백하게 대조하십시오.
-        3. 전문적 통찰: 단순한 차이점 나열에 그치지 않고, 정책적 기조나 규제 진화 배경 등 그러한 차이가 발생한 원인에 대한 전문가적 분석을 사실관계에 근거하여 서술하십시오.
-        4. 형식: 한국어 존댓말을 사용하며, 가독성을 위해 비교 요약표 등 마크다운을 체계적으로 활용하십시오.
+        1. 객관성 및 사실 기반: 비유, 과장, 아첨을 엄격히 금지합니다. 객관적이고 사실적인 대조를 우선시하십시오.
+        2. 출처 구분 (DB vs 웹): 제공된 [분석 대상 문서들] 기반의 분석을 'DB 참조'로 명시하고, 규제 변화 배경이나 최신 동향 등 보완 설명이 필요할 경우 통합된 구글 검색 도구를 활용하여 '웹 참조'로 명확히 분리하여 서술하십시오.
+        3. 문서 기반 대조 및 출처 자동화: 요구 자료의 수준, 용어 정의, 실무적 기준점 차이를 대조하고, 특정 내용 언급 시 해당 문서의 [섹션/조항] 정보를 반드시 표기하십시오.
+        4. 전문적 통찰: 공통점과 차이점 도출에 그치지 않고, 가장 엄격한 기준이 무엇인지, 그리고 그러한 규제 차이가 실무 전략에 미치는 영향을 사실관계에 입각해 서술하십시오.
+        5. 형식: 한국어 존댓말을 사용하며, 가독성을 위해 비교 요약표 등 마크다운을 체계적으로 활용하십시오.
         """
 
-        prompt = f"[분석 대상 문서들]\n{docs_text}\n\n위 문서들을 종합적이고 심층적으로 비교 분석하십시오."
+        prompt = f"질문/요청: {user_query}\n\n[분석 대상 문서들]\n{docs_text}"
 
         response = client.models.generate_content(
             model=REASONING_MODEL,
             contents=prompt,
             config=types.GenerateContentConfig(
                 system_instruction=system_instruction,
-                temperature=0.1
+                temperature=0.0, # 문서 대조 시 할루시네이션 방지
+                tools=[types.Tool(google_search=types.GoogleSearch())] # 비교 시에도 부족한 맥락을 검색하도록 도구 추가
             )
         )
         return response.text
