@@ -30,47 +30,57 @@ def clean_and_chunk_text(text, chunk_size=1000, overlap=100):
 def process_embeddings():
     print("--- Starting Document Embedding (DB Text Reader Mode) ---")
     
-    all_docs = supabase.table("guidelines").select("url, title, raw_text").not_.is_("raw_text", "null").not_.ilike("raw_text", "%추출 불가%").execute().data
+    # 메타데이터 추출을 위해 agency, category 추가
+    all_docs = supabase.table("guidelines").select("url, title, agency, category, raw_text").not_.is_("raw_text", "null").not_.ilike("raw_text", "%추출 불가%").execute().data
     
     print("--- 기존 임베딩 완료 문서 개별 확인 중 (1000 한계 우회) ---")
     valid_embedded_urls = set()
-    for doc in all_docs:
-        res = supabase.table("document_chunks").select("url").eq("url", doc["url"]).neq("content", "FAILED").limit(1).execute()
-        if res.data:
-            valid_embedded_urls.add(doc["url"])
-            
+    page_size = 1000
+    for i in range(100):
+        chunk_response = supabase.table("document_chunks").select("url").neq("content", "FAILED").range(i * page_size, (i + 1) * page_size - 1).execute()
+        if not chunk_response.data:
+            break
+        valid_embedded_urls.update(item['url'] for item in chunk_response.data)
+
     unprocessed_docs = [doc for doc in all_docs if doc['url'] not in valid_embedded_urls]
     
     if not unprocessed_docs:
-        print("모든 유효 문서의 임베딩이 완료되었습니다.")
+        print(" -> 새로 임베딩할 문서가 없습니다. 🟢")
         return
 
-    print(f"총 {len(unprocessed_docs)}건의 미완료 문서 임베딩을 일괄 진행합니다.")
+    print(f" -> 총 {len(unprocessed_docs)}개의 문서를 임베딩합니다.")
 
     for target_doc in unprocessed_docs:
         print(f"\nProcessing: {target_doc['title']}")
         
+        # 메타데이터 헤더 생성
+        agency = target_doc.get('agency') or 'N/A'
+        title = target_doc.get('title') or 'N/A'
+        category = target_doc.get('category') or 'N/A'
+        meta_header = f"[기관: {agency}]\n[문서명: {title}]\n[분류: {category}]\n본문: "
+        
         supabase.table("document_chunks").delete().eq("url", target_doc["url"]).execute()
         
         text = target_doc.get("raw_text", "")
-        if not text or "추출 불가" in text:
-            print(" -> 유효한 원본 텍스트가 없습니다. 임베딩 생략.")
+        if not text.strip() or "추출 불가" in text:
+            print(" -> 유효한 텍스트가 없어 임베딩을 생략합니다.")
             continue
-
+            
         chunks = clean_and_chunk_text(text)
-        print(f" -> {len(chunks)} 개의 청크로 분할 완료. 임베딩 시작...")
-
-        success = True
+        print(f" -> {len(chunks)}개 청크 분할 완료. 임베딩 API 호출 시작...")
+        
         batch_records = []
+        success = True
         
         for i, chunk in enumerate(chunks):
+            chunk_with_meta = meta_header + chunk
             embedding_vector = None
             
             for attempt in range(3):
                 try:
                     response = client.models.embed_content(
                         model=EMBEDDING_MODEL,
-                        contents=chunk
+                        contents=chunk_with_meta
                     )
                     embedding_vector = response.embeddings[0].values
                     break 
@@ -86,7 +96,7 @@ def process_embeddings():
             batch_records.append({
                 "url": target_doc["url"],
                 "chunk_index": i,
-                "content": chunk,
+                "content": chunk_with_meta,
                 "embedding": embedding_vector
             })
             
