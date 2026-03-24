@@ -28,7 +28,7 @@ except Exception as e:
     exit(1)
 
 client = genai.Client(api_key=GEMINI_API_KEY)
-FILTER_MODEL = "gemini-3.0-flash"
+FILTER_MODEL = "gemini-3.1-flash-lite-preview"
 
 REQUEST_HEADERS = {
     "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
