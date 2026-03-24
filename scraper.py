@@ -76,7 +76,7 @@ def search_agency_guidelines(agency, site_domain):
         return []
     
     # API 키 검증 오류 방지
-    print(f"현재 로드된 API KEY 앞 5자리: {GOOGLE_SEARCH_API_KEY[:5]}***")
+    print(f"현재 로드된 API KEY 앞뒤 식별: {GOOGLE_SEARCH_API_KEY[:5]}***{GOOGLE_SEARCH_API_KEY[-4:]}")
 
     query = f'site:{site_domain} "biosimilar" OR "monoclonal antibody" filetype:pdf'
     url = "https://www.googleapis.com/customsearch/v1"
