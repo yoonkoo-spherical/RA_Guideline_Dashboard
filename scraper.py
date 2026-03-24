@@ -18,8 +18,8 @@ SUPABASE_URL = os.getenv("SUPABASE_URL")
 SUPABASE_KEY = os.getenv("SUPABASE_KEY")
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
 
-GOOGLE_SEARCH_API_KEY = os.getenv("GOOGLE_SEARCH_API_KEY")
-GOOGLE_SEARCH_CX = os.getenv("GOOGLE_SEARCH_CX")
+# 구글 API 변수를 Serper API 변수로 교체
+SERPER_API_KEY = os.getenv("SERPER_API_KEY")
 
 try:
     supabase: Client = create_client(SUPABASE_URL, SUPABASE_KEY)
@@ -38,13 +38,11 @@ def is_valid_text(text):
     """추출된 텍스트가 의미 있는 문자열인지 판별합니다."""
     if not text.strip():
         return False
-    # 영문자, 숫자, 한글의 개수를 측정
     alphanumeric_count = len(re.findall(r'[a-zA-Z0-9가-힣]', text))
     total_length = len(text.replace(" ", "").replace("\n", ""))
     
     if total_length == 0:
         return False
-    # 유효 문자 비율이 40% 이상인지 확인
     return (alphanumeric_count / total_length) > 0.4
 
 def extract_text_with_ocr(file_path):
@@ -55,12 +53,10 @@ def extract_text_with_ocr(file_path):
         for page in doc:
             page_text = page.get_text()
             
-            # 텍스트가 정상적으로 추출되었는지 확인
             if is_valid_text(page_text):
                 text += page_text + "\n"
             else:
-                # 텍스트가 없거나 깨진 경우 해당 페이지만 OCR 적용
-                pix = page.get_pixmap(dpi=150) # 해상도 지정으로 OCR 품질 확보
+                pix = page.get_pixmap(dpi=150)
                 img = Image.frombytes("RGB", [pix.width, pix.height], pix.samples)
                 ocr_text = pytesseract.image_to_string(img, lang='eng+kor')
                 text += ocr_text + "\n"
@@ -71,26 +67,32 @@ def extract_text_with_ocr(file_path):
         return f"추출 불가: {e}"
 
 def search_agency_guidelines(agency, site_domain):
-    if not GOOGLE_SEARCH_API_KEY or not GOOGLE_SEARCH_CX:
-        print("구글 검색 API 환경 변수가 설정되지 않았습니다.")
+    """Serper API를 사용하여 규제 기관의 가이드라인(PDF)을 검색합니다."""
+    if not SERPER_API_KEY:
+        print("Serper API 환경 변수가 설정되지 않았습니다.")
         return []
     
-    # API 키 검증 오류 방지
-    print(f"현재 로드된 API KEY 앞뒤 식별: {GOOGLE_SEARCH_API_KEY[:5]}***{GOOGLE_SEARCH_API_KEY[-4:]}")
-
     query = f'site:{site_domain} "biosimilar" OR "monoclonal antibody" filetype:pdf'
-    url = "https://www.googleapis.com/customsearch/v1"
-    params = {
-        'key': GOOGLE_SEARCH_API_KEY,
-        'cx': GOOGLE_SEARCH_CX,
-        'q': query,
-        'num': 10
+    url = "https://google.serper.dev/search"
+    
+    # Serper API 요청 본문
+    payload = json.dumps({
+        "q": query,
+        "num": 10
+    })
+    
+    # Serper API 헤더
+    headers = {
+        'X-API-KEY': SERPER_API_KEY,
+        'Content-Type': 'application/json'
     }
 
     try:
-        response = requests.get(url, params=params, timeout=30)
+        response = requests.post(url, headers=headers, data=payload, timeout=30)
         response.raise_for_status()
-        search_results = response.json().get('items', [])
+        
+        # 'organic' 배열 내에 검색 결과가 포함됨
+        search_results = response.json().get('organic', [])
         
         extracted_links = []
         for item in search_results:
@@ -102,9 +104,8 @@ def search_agency_guidelines(agency, site_domain):
             })
         return extracted_links
     except requests.exceptions.HTTPError as e:
-        error_details = e.response.text
         print(f"{agency} 검색 API HTTP 오류 발생: {e.response.status_code}")
-        print(f"상세 오류 메시지: {error_details}")
+        print(f"상세 오류 메시지: {e.response.text}")
         return []
     except Exception as e:
         print(f"{agency} 검색 중 일반 오류 발생: {e}")
@@ -136,7 +137,6 @@ def filter_links_with_llm(links):
             if result.get("is_relevant"):
                 valid_links.append(link)
         except Exception as e:
-            # 예외 발생 시 Fail-closed 적용 (다운로드 목록에서 제외)
             print(f"LLM 필터링 중 오류 발생({link['url']}): {e} -> 목록에서 제외됨")
             
         time.sleep(0.5)
@@ -154,7 +154,6 @@ def download_and_save_pdf(doc_info):
     print(f" - 다운로드 시도: {url}")
     temp_pdf_path = None
     try:
-        # 스트리밍 방식으로 파일 다운로드 (메모리 최적화)
         res = requests.get(url, headers=REQUEST_HEADERS, stream=True, timeout=30)
         res.raise_for_status()
         
@@ -164,7 +163,6 @@ def download_and_save_pdf(doc_info):
                     temp_pdf.write(chunk)
             temp_pdf_path = temp_pdf.name
         
-        # 임시 파일에서 텍스트 추출
         raw_text = extract_text_with_ocr(temp_pdf_path)
         
         supabase.table("guidelines").insert({
@@ -181,7 +179,6 @@ def download_and_save_pdf(doc_info):
     except Exception as e:
         print(f" - 다운로드 또는 저장 실패 ({url}): {e}")
     finally:
-        # 작업 완료 후 임시 파일 삭제
         if temp_pdf_path and os.path.exists(temp_pdf_path):
             os.remove(temp_pdf_path)
 
