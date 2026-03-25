@@ -9,3 +9,5 @@ google-genai
 markdown
 pytesseract
 pdf2image
+cloudscraper
+Pillow
