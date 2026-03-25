@@ -11,6 +11,7 @@ from dotenv import load_dotenv
 import json
 from google import genai
 from google.genai import types
+import cloudscraper  # 봇 탐지 회피용 라이브러리 추가
 
 load_dotenv()
 
@@ -18,7 +19,6 @@ SUPABASE_URL = os.getenv("SUPABASE_URL")
 SUPABASE_KEY = os.getenv("SUPABASE_KEY")
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
 
-# 구글 API 변수를 Serper API 변수로 교체
 SERPER_API_KEY = os.getenv("SERPER_API_KEY")
 
 try:
@@ -40,7 +40,7 @@ def is_valid_text(text):
         return False
     alphanumeric_count = len(re.findall(r'[a-zA-Z0-9가-힣]', text))
     total_length = len(text.replace(" ", "").replace("\n", ""))
-    
+
     if total_length == 0:
         return False
     return (alphanumeric_count / total_length) > 0.4
@@ -52,7 +52,7 @@ def extract_text_with_ocr(file_path):
         doc = fitz.open(file_path)
         for page in doc:
             page_text = page.get_text()
-            
+
             if is_valid_text(page_text):
                 text += page_text + "\n"
             else:
@@ -60,7 +60,7 @@ def extract_text_with_ocr(file_path):
                 img = Image.frombytes("RGB", [pix.width, pix.height], pix.samples)
                 ocr_text = pytesseract.image_to_string(img, lang='eng+kor')
                 text += ocr_text + "\n"
-                
+
         doc.close()
         return text if text.strip() else "추출 불가: 유효 텍스트 없음"
     except Exception as e:
@@ -71,17 +71,15 @@ def search_agency_guidelines(agency, site_domain):
     if not SERPER_API_KEY:
         print("Serper API 환경 변수가 설정되지 않았습니다.")
         return []
-    
+
     query = f'site:{site_domain} "biosimilar" OR "monoclonal antibody" filetype:pdf'
     url = "https://google.serper.dev/search"
-    
-    # Serper API 요청 본문
+
     payload = json.dumps({
         "q": query,
         "num": 10
     })
-    
-    # Serper API 헤더
+
     headers = {
         'X-API-KEY': SERPER_API_KEY,
         'Content-Type': 'application/json'
@@ -90,10 +88,9 @@ def search_agency_guidelines(agency, site_domain):
     try:
         response = requests.post(url, headers=headers, data=payload, timeout=30)
         response.raise_for_status()
-        
-        # 'organic' 배열 내에 검색 결과가 포함됨
+
         search_results = response.json().get('organic', [])
-        
+
         extracted_links = []
         for item in search_results:
             extracted_links.append({
@@ -127,25 +124,38 @@ def filter_links_with_llm(links):
         
         오직 JSON 형식으로만 응답하십시오: {{"is_relevant": true 또는 false}}
         """
-        try:
-            response = client.models.generate_content(
-                model=FILTER_MODEL,
-                contents=prompt,
-                config=types.GenerateContentConfig(temperature=0.0, response_mime_type="application/json")
-            )
-            result = json.loads(response.text)
-            if result.get("is_relevant"):
-                valid_links.append(link)
-        except Exception as e:
-            print(f"LLM 필터링 중 오류 발생({link['url']}): {e} -> 목록에서 제외됨")
+        
+        max_retries = 3
+        retry_delay = 2
+
+        for attempt in range(max_retries):
+            try:
+                response = client.models.generate_content(
+                    model=FILTER_MODEL,
+                    contents=prompt,
+                    config=types.GenerateContentConfig(temperature=0.0, response_mime_type="application/json")
+                )
+                result = json.loads(response.text)
+                if result.get("is_relevant"):
+                    valid_links.append(link)
+                break  # 성공 시 재시도 루프 탈출
+                
+            except Exception as e:
+                if "503" in str(e) and attempt < max_retries - 1:
+                    print(f"서버 과부하(503) 발생. {retry_delay}초 후 다시 시도합니다... (시도 {attempt + 1}/{max_retries})")
+                    time.sleep(retry_delay)
+                    retry_delay *= 2
+                else:
+                    print(f"LLM 필터링 중 오류 발생({link['url']}): {e} -> 목록에서 제외됨")
+                    break
             
-        time.sleep(0.5)
+        time.sleep(1.0)  # 서버 부하 방지를 위해 요청 간격 증가
 
     return valid_links
 
 def download_and_save_pdf(doc_info):
     url = doc_info['url']
-    
+
     existing = supabase.table("guidelines").select("url").eq("url", url).execute()
     if existing.data:
         print(f" - 이미 존재하는 문서: {url}")
@@ -154,17 +164,19 @@ def download_and_save_pdf(doc_info):
     print(f" - 다운로드 시도: {url}")
     temp_pdf_path = None
     try:
-        res = requests.get(url, headers=REQUEST_HEADERS, stream=True, timeout=30)
+        # requests 대신 cloudscraper 인스턴스 사용
+        scraper = cloudscraper.create_scraper()
+        res = scraper.get(url, stream=True, timeout=30)
         res.raise_for_status()
-        
+
         with tempfile.NamedTemporaryFile(delete=False, suffix=".pdf") as temp_pdf:
             for chunk in res.iter_content(chunk_size=8192):
                 if chunk:
                     temp_pdf.write(chunk)
             temp_pdf_path = temp_pdf.name
-        
+
         raw_text = extract_text_with_ocr(temp_pdf_path)
-        
+
         supabase.table("guidelines").insert({
             "title": doc_info['title'],
             "agency": doc_info['agency'],
@@ -173,27 +185,26 @@ def download_and_save_pdf(doc_info):
             "raw_text": raw_text
         }).execute()
         print(f" - DB 저장 완료: {doc_info['title']}")
-        
-    except requests.exceptions.HTTPError as e:
-        print(f" - 다운로드 거부(HTTP Error) ({url}): {e.response.status_code}")
+
     except Exception as e:
-        print(f" - 다운로드 또는 저장 실패 ({url}): {e}")
+        # cloudscraper를 포함한 에러 메시지 간소화
+        print(f" - 다운로드 거부 또는 저장 실패 ({url}): {e}")
     finally:
         if temp_pdf_path and os.path.exists(temp_pdf_path):
             os.remove(temp_pdf_path)
 
 def run_scraper():
     print("--- 지능형 가이드라인 수집기 시작 ---")
-    
+
     agencies = [
         {"name": "FDA", "domain": "fda.gov"},
         {"name": "EMA", "domain": "ema.europa.eu"},
         {"name": "MHRA", "domain": "gov.uk"},
         {"name": "Health Canada", "domain": "canada.ca"}
     ]
-    
+
     all_raw_links = []
-    
+
     for agency in agencies:
         print(f"\n[{agency['name']}] 검색 중...")
         links = search_agency_guidelines(agency['name'], agency['domain'])
@@ -209,7 +220,7 @@ def run_scraper():
     for doc in filtered_links:
         download_and_save_pdf(doc)
         time.sleep(1)
-        
+
     print("\n--- 수집기 작동 종료 ---")
 
 if __name__ == "__main__":
