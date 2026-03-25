@@ -11,7 +11,7 @@ from dotenv import load_dotenv
 import json
 from google import genai
 from google.genai import types
-import cloudscraper  # 봇 탐지 회피용 라이브러리 추가
+from curl_cffi import requests as curl_requests  # 최신 WAF 우회 라이브러리 추가
 
 load_dotenv()
 
@@ -124,7 +124,7 @@ def filter_links_with_llm(links):
         
         오직 JSON 형식으로만 응답하십시오: {{"is_relevant": true 또는 false}}
         """
-        
+
         max_retries = 3
         retry_delay = 2
 
@@ -138,8 +138,8 @@ def filter_links_with_llm(links):
                 result = json.loads(response.text)
                 if result.get("is_relevant"):
                     valid_links.append(link)
-                break  # 성공 시 재시도 루프 탈출
-                
+                break
+
             except Exception as e:
                 if "503" in str(e) and attempt < max_retries - 1:
                     print(f"서버 과부하(503) 발생. {retry_delay}초 후 다시 시도합니다... (시도 {attempt + 1}/{max_retries})")
@@ -148,8 +148,8 @@ def filter_links_with_llm(links):
                 else:
                     print(f"LLM 필터링 중 오류 발생({link['url']}): {e} -> 목록에서 제외됨")
                     break
-            
-        time.sleep(1.0)  # 서버 부하 방지를 위해 요청 간격 증가
+
+        time.sleep(1.0)
 
     return valid_links
 
@@ -163,35 +163,39 @@ def download_and_save_pdf(doc_info):
 
     print(f" - 다운로드 시도: {url}")
     temp_pdf_path = None
-    try:
-        # requests 대신 cloudscraper 인스턴스 사용
-        scraper = cloudscraper.create_scraper()
-        res = scraper.get(url, stream=True, timeout=30)
-        res.raise_for_status()
+    max_retries = 3
 
-        with tempfile.NamedTemporaryFile(delete=False, suffix=".pdf") as temp_pdf:
-            for chunk in res.iter_content(chunk_size=8192):
-                if chunk:
-                    temp_pdf.write(chunk)
-            temp_pdf_path = temp_pdf.name
+    for attempt in range(max_retries):
+        try:
+            # curl_cffi를 사용하여 크롬 110 버전의 지문 모방 및 타임아웃 60초 지정
+            res = curl_requests.get(url, impersonate="chrome110", timeout=60)
+            res.raise_for_status()
 
-        raw_text = extract_text_with_ocr(temp_pdf_path)
+            with tempfile.NamedTemporaryFile(delete=False, suffix=".pdf") as temp_pdf:
+                temp_pdf.write(res.content)
+                temp_pdf_path = temp_pdf.name
 
-        supabase.table("guidelines").insert({
-            "title": doc_info['title'],
-            "agency": doc_info['agency'],
-            "category": "Biosimilar/mAb",
-            "url": url,
-            "raw_text": raw_text
-        }).execute()
-        print(f" - DB 저장 완료: {doc_info['title']}")
+            raw_text = extract_text_with_ocr(temp_pdf_path)
 
-    except Exception as e:
-        # cloudscraper를 포함한 에러 메시지 간소화
-        print(f" - 다운로드 거부 또는 저장 실패 ({url}): {e}")
-    finally:
-        if temp_pdf_path and os.path.exists(temp_pdf_path):
-            os.remove(temp_pdf_path)
+            supabase.table("guidelines").insert({
+                "title": doc_info['title'],
+                "agency": doc_info['agency'],
+                "category": "Biosimilar/mAb",
+                "url": url,
+                "raw_text": raw_text
+            }).execute()
+            print(f" - DB 저장 완료: {doc_info['title']}")
+            break  # 성공 시 재시도 루프 탈출
+
+        except Exception as e:
+            print(f" - 다운로드 실패 (시도 {attempt + 1}/{max_retries}) ({url}): {e}")
+            if attempt < max_retries - 1:
+                time.sleep(5)  # 실패 시 5초 대기 후 재시도
+        finally:
+            # 매 시도마다 임시 파일이 생성되었다면 삭제하여 용량 관리
+            if temp_pdf_path and os.path.exists(temp_pdf_path):
+                os.remove(temp_pdf_path)
+                temp_pdf_path = None
 
 def run_scraper():
     print("--- 지능형 가이드라인 수집기 시작 ---")
