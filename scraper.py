@@ -73,32 +73,51 @@ def extract_text_with_ocr(file_path):
         return f"추출 불가: {e}"
 
 def request_with_retry(url, max_retries=3):
-    """지수 백오프 및 랜덤 지연을 적용한 HTTP 요청"""
+    """지수 백오프, 랜덤 지연 및 표준 requests 폴백을 적용한 HTTP 요청"""
     wait_time = 5
     for attempt in range(max_retries):
         try:
             # 요청 전 랜덤 지연 (2~5초)
             time.sleep(random.uniform(2.0, 5.0))
-            
+
+            # 1차 시도: curl_cffi 사용
             res = curl_requests.get(
                 url, 
                 impersonate="chrome110", 
                 headers=BROWSER_HEADERS, 
                 timeout=60
             )
-            
+
             if res.status_code == 429:
                 print(f"   [!] 429 Too Many Requests. {wait_time}초 대기 후 재시도 ({attempt+1}/{max_retries})")
                 time.sleep(wait_time)
                 wait_time *= 2
                 continue
-            
+
             res.raise_for_status()
             return res
+            
         except Exception as e:
+            error_msg = str(e)
+            # HTTP/2 오류나 타임아웃 발생 시 표준 requests 모듈로 즉시 폴백 시도
+            if "INTERNAL_ERROR" in error_msg or "time" in error_msg.lower() or "timeout" in error_msg.lower():
+                try:
+                    time.sleep(2)
+                    res_fallback = requests.get(
+                        url, 
+                        headers=BROWSER_HEADERS, 
+                        timeout=60,
+                        verify=False # SSL 인증서 문제 우회 (필요시)
+                    )
+                    res_fallback.raise_for_status()
+                    return res_fallback
+                except Exception as fallback_e:
+                    error_msg = f"curl_cffi 및 requests 폴백 모두 실패: {fallback_e}"
+
             if attempt == max_retries - 1:
-                print(f"   [!] 최종 요청 실패: {url} ({e})")
+                print(f"   [!] 최종 요청 실패: {url} ({error_msg})")
                 return None
+            
             time.sleep(wait_time)
             wait_time *= 2
     return None
@@ -123,7 +142,7 @@ def search_agency_guidelines(agency, site_domain):
         if response.status_code != 200:
             print(f"[{agency}] API 오류 ({response.status_code}): {response.text}")
             return []
-        
+
         search_results = response.json().get('organic', [])
         return [{
             "agency": agency,
@@ -183,7 +202,7 @@ def download_and_save(pdf_url, doc_info):
             "url": pdf_url,
             "raw_text": raw_text
         }).execute()
-        
+
         print(f"   -> DB 저장 완료")
         if os.path.exists(temp_path):
             os.remove(temp_path)
@@ -191,22 +210,32 @@ def download_and_save(pdf_url, doc_info):
         print(f"   -> 처리 오류: {e}")
 
 def process_document(link):
-    """PDF 여부 판별 및 HTML 내 PDF 탐색"""
+    """PDF 여부 판별 및 HTML 내 PDF 탐색 (확장된 파싱 로직 적용)"""
     url = link['url']
     if url.lower().endswith('.pdf'):
         download_and_save(url, link)
     else:
         res = request_with_retry(url)
         if not res: return
-        
+
         try:
             soup = BeautifulSoup(res.text, 'html.parser')
             pdf_links = []
-            for a in soup.find_all('a', href=True):
-                href = a['href']
-                if href.lower().endswith('.pdf'):
-                    pdf_links.append(urljoin(url, href))
             
+            for a in soup.find_all('a', href=True):
+                href = a['href'].lower()
+                text = a.get_text().lower()
+                
+                # 1. 표준 PDF 확장자 확인
+                if '.pdf' in href:
+                    pdf_links.append(urljoin(url, a['href']))
+                # 2. FDA 스타일 다운로드 링크 확인 (/media/숫자/download)
+                elif '/media/' in href and '/download' in href:
+                    pdf_links.append(urljoin(url, a['href']))
+                # 3. 텍스트에 PDF가 포함된 유효 링크 확인
+                elif 'pdf' in text and not href.startswith(('javascript:', '#', 'mailto:')):
+                    pdf_links.append(urljoin(url, a['href']))
+
             # 발견된 PDF 중 중복 제거 후 상위 3개 처리
             unique_pdfs = list(set(pdf_links))
             if unique_pdfs:
@@ -220,7 +249,7 @@ def process_document(link):
 
 def run_scraper():
     print("--- 지능형 규제 가이드라인 수집기 가동 ---")
-    
+
     agencies = [
         {"name": "FDA", "domain": "fda.gov"},
         {"name": "EMA", "domain": "ema.europa.eu"},
@@ -249,4 +278,6 @@ def run_scraper():
     print("\n--- 모든 수집 작업 종료 ---")
 
 if __name__ == "__main__":
+    import urllib3
+    urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
     run_scraper()
