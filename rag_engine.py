@@ -5,6 +5,7 @@ from google import genai
 from google.genai import types
 from supabase import create_client, Client
 from dotenv import load_dotenv
+import streamlit as st
 
 # 환경 변수 로드
 load_dotenv()
@@ -29,20 +30,32 @@ EMBEDDING_MODEL = "gemini-embedding-001"
 MAX_TOTAL_CHARS = 35000 
 
 def execute_with_retry(api_call_func, max_retries=3):
-    """API 호출 중 503 또는 429 에러 발생 시 지수 백오프로 재시도하는 래퍼 함수입니다."""
+    """API 호출 중 500, 503 또는 429 에러 발생 시 지수 백오프로 재시도하는 래퍼 함수입니다."""
     for attempt in range(max_retries):
         try:
             return api_call_func()
         except Exception as e:
             error_msg = str(e)
-            if "503" in error_msg or "429" in error_msg or "UNAVAILABLE" in error_msg:
+            # 500 에러(Internal Server Error) 조건을 추가
+            if "503" in error_msg or "429" in error_msg or "UNAVAILABLE" in error_msg or "500" in error_msg or "INTERNAL" in error_msg:
                 if attempt < max_retries - 1:
                     sleep_time = 2 ** (attempt + 1)
-                    print(f"API 서버 지연/한도 초과 발생. {sleep_time}초 후 재시도합니다... (에러: {error_msg})")
+                    log_message = f"API 서버 지연/에러 발생. {sleep_time}초 후 재시도합니다... (시도: {attempt+1}/{max_retries-1})"
+                    
+                    # 터미널 창에 출력
+                    print(log_message)
+                    
+                    # Streamlit 웹 브라우저 UI에 토스트 알림 출력
+                    try:
+                        st.toast(log_message, icon="⏳")
+                    except Exception:
+                        pass
+                        
                     time.sleep(sleep_time)
                 else:
                     raise e
             else:
+                # 지정된 에러가 아닌 경우 즉시 예외 발생
                 raise e
 
 def get_embedding(text: str):
