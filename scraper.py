@@ -63,44 +63,48 @@ def extract_text_with_ocr(file_path):
         return f"추출 불가: {e}"
 
 def search_agency_guidelines(agency, site_domain):
-    """검색 쿼리 및 결과 수를 확장하여 검색 수행"""
+    """
+    Serper API 차단을 피하기 위해 쿼리를 단순화하고 num을 조정합니다.
+    """
     if not SERPER_API_KEY:
-        print(f"[{agency}] Serper API Key가 환경 변수에서 로드되지 않았습니다.")
+        print(f"[{agency}] API Key missing.")
         return []
 
-    # 검색 쿼리를 단순화하여 테스트 (괄호 제거)
-    query = f'site:{site_domain} biosimilar guidance OR guideline OR draft OR submission'
+    # 개선 사항: 괄호()와 복잡한 OR 연산자 제거, 따옴표 최소화
+    # 구글 검색 엔진이 문맥으로 이해하도록 단순 나열 방식으로 변경
+    query = f"site:{site_domain} biosimilar guidance draft submission requirement information"
     
     url = "https://google.serper.dev/search"
     
-    # num을 안전하게 10으로 낮추어 테스트
+    # num을 10으로 하향 조정하여 요청 안정성 확보
     payload = json.dumps({
         "q": query, 
-        "num": 30 
+        "num": 10 
     })
     
     headers = {
-        'X-API-KEY': str(SERPER_API_KEY).strip(), # 공백 제거 및 문자열 확정
+        'X-API-KEY': str(SERPER_API_KEY).strip(),
         'Content-Type': 'application/json'
     }
 
     try:
         response = requests.post(url, headers=headers, data=payload, timeout=30)
         
-        # 400 에러 시 서버의 응답 본문을 출력하여 원인 파악
         if response.status_code != 200:
-            print(f"[{agency}] API 오류 발생: {response.status_code}")
-            print(f"상세 내용: {response.text}") # 이 부분이 핵심입니다.
+            print(f"[{agency}] API 오류 ({response.status_code}): {response.text}")
+            # 만약 site: 연산자 자체가 막힌 경우를 대비해 2차 시도 (옵션)
             return []
             
+        search_results = response.json().get('organic', [])
         return [{
             "agency": agency,
             "title": item.get('title', ''),
             "snippet": item.get('snippet', ''),
             "url": item.get('link', '')
-        } for item in response.json().get('organic', [])]
+        } for item in search_results]
+        
     except Exception as e:
-        print(f"[{agency}] 네트워크 또는 실행 오류: {e}")
+        print(f"[{agency}] 실행 중 예외 발생: {e}")
         return []
 
 def filter_links_with_llm(links):
