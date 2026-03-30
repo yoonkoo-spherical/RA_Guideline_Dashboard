@@ -26,8 +26,8 @@ REASONING_MODEL = "gemini-2.5-pro"
 FAST_MODEL = "gemini-3.1-flash"
 EMBEDDING_MODEL = "gemini-embedding-001"
 
-# Tier 1 환경 및 비용/성능 최적화 최대 전송 글자 수
-MAX_TOTAL_CHARS = 35000 
+# Tier 1 환경 한도 준수를 위한 최대 전송 글자 수
+MAX_TOTAL_CHARS = 25000 
 
 def execute_with_retry(api_call_func, max_retries=3):
     """API 호출 중 500, 503 또는 429 에러 발생 시 지수 백오프로 재시도하는 래퍼 함수입니다."""
@@ -36,16 +36,13 @@ def execute_with_retry(api_call_func, max_retries=3):
             return api_call_func()
         except Exception as e:
             error_msg = str(e)
-            # 500 에러(Internal Server Error) 조건을 추가
             if "503" in error_msg or "429" in error_msg or "UNAVAILABLE" in error_msg or "500" in error_msg or "INTERNAL" in error_msg:
                 if attempt < max_retries - 1:
                     sleep_time = 2 ** (attempt + 1)
                     log_message = f"API 서버 지연/에러 발생. {sleep_time}초 후 재시도합니다... (시도: {attempt+1}/{max_retries-1})"
                     
-                    # 터미널 창에 출력
                     print(log_message)
                     
-                    # Streamlit 웹 브라우저 UI에 토스트 알림 출력
                     try:
                         st.toast(log_message, icon="⏳")
                     except Exception:
@@ -55,7 +52,6 @@ def execute_with_retry(api_call_func, max_retries=3):
                 else:
                     raise e
             else:
-                # 지정된 에러가 아닌 경우 즉시 예외 발생
                 raise e
 
 def get_embedding(text: str):
@@ -256,19 +252,49 @@ def ask_guideline(user_query: str):
     except Exception as e:
         return f"답변 생성 중 오류가 발생했습니다: {str(e)}", []
 
+def extract_core_content(text: str, query: str, max_length: int) -> str:
+    """단순 절삭을 방지하기 위해 FAST_MODEL을 활용하여 핵심 문맥을 선별적으로 압축합니다."""
+    prompt = f"""
+    다음 문서에서 사용자의 질의와 관련된 핵심 규제 요건, 기준점, 예외 조항 등을 추출하십시오.
+    객관적인 사실 관계 위주로 요약하며, 전체 텍스트 분량은 {max_length}자 내외로 구성하십시오.
+    
+    [사용자 질의]
+    {query}
+    
+    [문서 원문]
+    {text}
+    """
+    def _call_extract():
+        return client.models.generate_content(
+            model=FAST_MODEL,
+            contents=prompt,
+            config=types.GenerateContentConfig(temperature=0.0)
+        )
+    try:
+        response = execute_with_retry(_call_extract)
+        return response.text
+    except Exception as e:
+        print(f"Extraction failed, falling back to truncation: {e}")
+        return text[:max_length]
 
 def compare_multiple_documents(docs_info, user_query: str = "위 문서들을 종합적이고 심층적으로 비교 분석하십시오."):
     """다수의 가이드라인 문서를 객관적으로 대조하고 웹 검색을 통해 심층 분석을 보완합니다."""
     try:
         docs_text = ""
         doc_count = len(docs_info)
-        chars_per_doc = (MAX_TOTAL_CHARS - 10000) // doc_count if doc_count > 0 else MAX_TOTAL_CHARS
+        chars_per_doc = MAX_TOTAL_CHARS // doc_count if doc_count > 0 else MAX_TOTAL_CHARS
 
         for i, doc in enumerate(docs_info):
             chunk_res = supabase.table("document_chunks").select("content").eq("url", doc['url']).order("chunk_index").execute()
             full_text = " ".join([c['content'] for c in chunk_res.data])
-            truncated_text = full_text[:chars_per_doc]
-            docs_text += f"\n\n--- [문서 {i+1}: {doc.get('title', 'Unknown')} ({doc.get('agency', 'N/A')})] ---\n{truncated_text}" 
+            
+            # 원문이 할당된 글자 수를 초과할 경우, 핵심 내용 압축 함수 호출
+            if len(full_text) > chars_per_doc:
+                processed_text = extract_core_content(full_text, user_query, chars_per_doc)
+            else:
+                processed_text = full_text
+                
+            docs_text += f"\n\n--- [문서 {i+1}: {doc.get('title', 'Unknown')} ({doc.get('agency', 'N/A')})] ---\n{processed_text}" 
 
         system_instruction = """
         당신은 바이오시밀러 및 제약 인허가에 정통한 30년 경력의 RA 최고 전문가입니다.
