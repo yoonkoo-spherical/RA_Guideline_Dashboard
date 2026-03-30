@@ -3,6 +3,7 @@ import time
 import json
 import re
 import tempfile
+import random
 from urllib.parse import urljoin
 
 import requests
@@ -33,6 +34,15 @@ except Exception as e:
 client = genai.Client(api_key=GEMINI_API_KEY)
 FILTER_MODEL = "gemini-3.1-flash-lite-preview"
 
+# 고도화된 브라우저 헤더 (429 및 차단 방지)
+BROWSER_HEADERS = {
+    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36",
+    "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8",
+    "Accept-Language": "ko-KR,ko;q=0.9,en-US;q=0.8,en;q=0.7",
+    "Referer": "https://www.google.com/",
+    "Connection": "keep-alive"
+}
+
 def is_valid_text(text):
     """추출된 텍스트의 유효성 판별"""
     if not text.strip():
@@ -62,26 +72,47 @@ def extract_text_with_ocr(file_path):
     except Exception as e:
         return f"추출 불가: {e}"
 
+def request_with_retry(url, max_retries=3):
+    """지수 백오프 및 랜덤 지연을 적용한 HTTP 요청"""
+    wait_time = 5
+    for attempt in range(max_retries):
+        try:
+            # 요청 전 랜덤 지연 (2~5초)
+            time.sleep(random.uniform(2.0, 5.0))
+            
+            res = curl_requests.get(
+                url, 
+                impersonate="chrome110", 
+                headers=BROWSER_HEADERS, 
+                timeout=60
+            )
+            
+            if res.status_code == 429:
+                print(f"   [!] 429 Too Many Requests. {wait_time}초 대기 후 재시도 ({attempt+1}/{max_retries})")
+                time.sleep(wait_time)
+                wait_time *= 2
+                continue
+            
+            res.raise_for_status()
+            return res
+        except Exception as e:
+            if attempt == max_retries - 1:
+                print(f"   [!] 최종 요청 실패: {url} ({e})")
+                return None
+            time.sleep(wait_time)
+            wait_time *= 2
+    return None
+
 def search_agency_guidelines(agency, site_domain):
-    """
-    Serper API 차단을 피하기 위해 쿼리를 단순화하고 num을 조정합니다.
-    """
+    """Serper API를 통한 문서 검색 (단순화된 쿼리 적용)"""
     if not SERPER_API_KEY:
-        print(f"[{agency}] API Key missing.")
+        print(f"[{agency}] Serper API Key missing.")
         return []
 
-    # 개선 사항: 괄호()와 복잡한 OR 연산자 제거, 따옴표 최소화
-    # 구글 검색 엔진이 문맥으로 이해하도록 단순 나열 방식으로 변경
+    # 400 에러 방지를 위한 단순화된 쿼리
     query = f"site:{site_domain} biosimilar guidance draft submission requirement information"
-    
     url = "https://google.serper.dev/search"
-    
-    # num을 10으로 하향 조정하여 요청 안정성 확보
-    payload = json.dumps({
-        "q": query, 
-        "num": 10 
-    })
-    
+    payload = json.dumps({"q": query, "num": 10})
     headers = {
         'X-API-KEY': str(SERPER_API_KEY).strip(),
         'Content-Type': 'application/json'
@@ -89,12 +120,10 @@ def search_agency_guidelines(agency, site_domain):
 
     try:
         response = requests.post(url, headers=headers, data=payload, timeout=30)
-        
         if response.status_code != 200:
             print(f"[{agency}] API 오류 ({response.status_code}): {response.text}")
-            # 만약 site: 연산자 자체가 막힌 경우를 대비해 2차 시도 (옵션)
             return []
-            
+        
         search_results = response.json().get('organic', [])
         return [{
             "agency": agency,
@@ -102,22 +131,20 @@ def search_agency_guidelines(agency, site_domain):
             "snippet": item.get('snippet', ''),
             "url": item.get('link', '')
         } for item in search_results]
-        
     except Exception as e:
-        print(f"[{agency}] 실행 중 예외 발생: {e}")
+        print(f"[{agency}] 검색 실행 중 예외 발생: {e}")
         return []
 
 def filter_links_with_llm(links):
-    """LLM을 통한 문서 유효성 검증 (Draft 및 규제 정보 포함)"""
+    """LLM을 통한 문서 유효성 검증"""
     if not links: return []
     valid_links = []
     for link in links:
         prompt = f"""
         이 문서가 바이오시밀러 또는 mAb의 개발, 인허가, 제출 요건(Submission Requirements), 또는 공식 초안(Draft) 가이드라인입니까?
         규제 기관의 공식 정보라면 true, 뉴스나 단순 홍보물이라면 false를 반환하세요.
-        문서 제목: {link['title']}
-        문서 요약: {link['snippet']}
-        URL: {link['url']}
+        제목: {link['title']}
+        요약: {link['snippet']}
         JSON 응답: {{"is_relevant": true/false}}
         """
         try:
@@ -134,17 +161,16 @@ def filter_links_with_llm(links):
     return valid_links
 
 def download_and_save(pdf_url, doc_info):
-    """실제 PDF 다운로드 및 DB 저장 공통 로직"""
+    """PDF 다운로드 및 DB 저장"""
     try:
-        # 중복 체크
         existing = supabase.table("guidelines").select("url").eq("url", pdf_url).execute()
         if existing.data:
             return
 
-        print(f"   -> 다운로드: {pdf_url}")
-        res = curl_requests.get(pdf_url, impersonate="chrome110", timeout=60)
-        res.raise_for_status()
+        res = request_with_retry(pdf_url)
+        if not res: return
 
+        print(f"   -> 다운로드 성공: {pdf_url}")
         with tempfile.NamedTemporaryFile(delete=False, suffix=".pdf") as temp_pdf:
             temp_pdf.write(res.content)
             temp_path = temp_pdf.name
@@ -157,39 +183,43 @@ def download_and_save(pdf_url, doc_info):
             "url": pdf_url,
             "raw_text": raw_text
         }).execute()
-        print(f"   -> DB 저장 완료")
         
+        print(f"   -> DB 저장 완료")
         if os.path.exists(temp_path):
             os.remove(temp_path)
     except Exception as e:
         print(f"   -> 처리 오류: {e}")
 
 def process_document(link):
-    """URL이 PDF이면 바로 저장, HTML이면 내부 PDF 탐색 후 저장"""
+    """PDF 여부 판별 및 HTML 내 PDF 탐색"""
     url = link['url']
     if url.lower().endswith('.pdf'):
         download_and_save(url, link)
     else:
-        # HTML 페이지에서 PDF 링크 탐색
+        res = request_with_retry(url)
+        if not res: return
+        
         try:
-            res = curl_requests.get(url, impersonate="chrome110", timeout=30)
-            res.raise_for_status()
             soup = BeautifulSoup(res.text, 'html.parser')
-            # 'biosimilar' 관련 텍스트가 포함되거나 'pdf' 확장자를 가진 링크 추출
             pdf_links = []
             for a in soup.find_all('a', href=True):
                 href = a['href']
                 if href.lower().endswith('.pdf'):
                     pdf_links.append(urljoin(url, href))
             
-            # 중복 제거 후 저장 (주요 문서 1~2개 우선 처리)
-            for pdf_url in list(set(pdf_links))[:3]:
-                download_and_save(pdf_url, link)
+            # 발견된 PDF 중 중복 제거 후 상위 3개 처리
+            unique_pdfs = list(set(pdf_links))
+            if unique_pdfs:
+                print(f"   -> HTML 내 {len(unique_pdfs)}개의 PDF 발견")
+                for pdf_url in unique_pdfs[:3]:
+                    download_and_save(pdf_url, link)
+            else:
+                print(f"   -> HTML 내 PDF 링크 없음")
         except Exception as e:
-            print(f"   -> HTML 파싱 실패: {url} ({e})")
+            print(f"   -> HTML 파싱 실패: {e}")
 
 def run_scraper():
-    print("--- 전방위 규제 가이드라인 수집기 가동 ---")
+    print("--- 지능형 규제 가이드라인 수집기 가동 ---")
     
     agencies = [
         {"name": "FDA", "domain": "fda.gov"},
@@ -203,19 +233,20 @@ def run_scraper():
     for agency in agencies:
         print(f"\n[{agency['name']}] 검색 중...")
         raw_results = search_agency_guidelines(agency['name'], agency['domain'])
-        print(f" -> {len(raw_results)}개 결과 발견. 필터링 시작...")
-        filtered = filter_links_with_llm(raw_results)
-        print(f" -> {len(filtered)}개 유효 문서 판별됨.")
-        all_links.extend(filtered)
-        time.sleep(1)
+        if raw_results:
+            print(f" -> {len(raw_results)}개 발견. 필터링 중...")
+            filtered = filter_links_with_llm(raw_results)
+            print(f" -> {len(filtered)}개 유효 판별.")
+            all_links.extend(filtered)
+        time.sleep(2)
 
     print("\n--- 문서 수집 및 분석 시작 ---")
     for link in all_links:
         print(f"\n[대상] {link['title']}")
         process_document(link)
-        time.sleep(1)
+        time.sleep(random.uniform(3, 6))
 
-    print("\n--- 수집 완료 ---")
+    print("\n--- 모든 수집 작업 종료 ---")
 
 if __name__ == "__main__":
     run_scraper()
