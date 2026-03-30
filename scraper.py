@@ -177,9 +177,6 @@ def run_scraper():
         {"name": "MHRA", "domain": "gov.uk"},
         {"name": "Health Canada", "domain": "canada.ca"},
         {"name": "Health Canada (Sub)", "domain": "hc-sc.gc.ca"},
-        {"name": "TGA (Australia)", "domain": "tga.gov.au"},
-        {"name": "PMDA (Japan)", "domain": "pmda.go.jp"},
-        {"name": "WHO", "domain": "who.int"}
     ]
 
     all_links = []
