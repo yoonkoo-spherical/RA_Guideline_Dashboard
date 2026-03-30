@@ -37,13 +37,12 @@ def execute_with_retry(api_call_func, max_retries=3):
             error_msg = str(e)
             if "503" in error_msg or "429" in error_msg or "UNAVAILABLE" in error_msg:
                 if attempt < max_retries - 1:
-                    sleep_time = 2 ** (attempt + 1) # 2초, 4초, 8초 대기
+                    sleep_time = 2 ** (attempt + 1)
                     print(f"API 서버 지연/한도 초과 발생. {sleep_time}초 후 재시도합니다... (에러: {error_msg})")
                     time.sleep(sleep_time)
                 else:
                     raise e
             else:
-                # 503, 429가 아닌 문법 오류 등은 즉시 예외 발생
                 raise e
 
 def get_embedding(text: str):
@@ -113,6 +112,7 @@ def ask_guideline(user_query: str):
     accessed_sources = []
 
     def search_guideline_database(content_query: str, target_agency: str = None, target_title_keyword: str = None) -> str:
+        """일반적인 가이드라인 내용 검색 도구입니다."""
         queries = expand_query(content_query)
         all_docs_map = {} 
 
@@ -147,6 +147,7 @@ def ask_guideline(user_query: str):
         return "\n\n".join(context_chunks)
 
     def get_recent_documents(limit: int = 5) -> str:
+        """최근 등록된 가이드라인 문서를 조회합니다."""
         try:
             res = supabase.table("guidelines").select("title, agency, category, url, created_at").order("created_at", desc=True).limit(limit).execute()
             docs = res.data
@@ -160,29 +161,62 @@ def ask_guideline(user_query: str):
             context_chunks.append(f"- 기관: {d['agency']}, 제목: {d['title']}, 분류: {d['category']}, DB추가일: {d['created_at'][:10]}")
         return "\n".join(context_chunks)
 
+    def get_document_change_history(target_title_keyword: str) -> str:
+        """
+        특정 가이드라인 문서의 개정 이력, 변경점, 타임라인 정보를 조회합니다.
+        사용자가 '변경점', '개정 내역', '타임라인' 등을 물어볼 때 반드시 호출하십시오.
+        """
+        try:
+            # 문서 식별자(ref_number) 또는 제목/내용 키워드로 버전 비교 이력 검색 (오름차순 정렬)
+            res = supabase.table("version_comparisons").select("*").ilike("ref_number", f"%{target_title_keyword}%").order("created_at", desc=False).execute()
+            docs = res.data
+            
+            # 검색 결과가 없으면 comparison_text에서 재검색
+            if not docs:
+                res = supabase.table("version_comparisons").select("*").ilike("comparison_text", f"%{target_title_keyword}%").order("created_at", desc=False).execute()
+                docs = res.data
+
+        except Exception as e:
+            return f"개정 이력 조회 중 오류가 발생했습니다: {e}"
+
+        if not docs:
+            return f"내부 DB에서 '{target_title_keyword}'에 대한 개정 이력을 찾을 수 없습니다. 구글 검색 도구를 활용하여 최신 변경점을 확인하십시오."
+
+        history_chunks = []
+        for d in docs:
+            # 신규 버전의 URL을 출처로 추가
+            if d.get('new_url'):
+                accessed_sources.append({"url": d['new_url']})
+            date_str = d.get('created_at', '')[:10]
+            history_chunks.append(f"-[DB 감지일: {date_str}, 식별자: {d.get('ref_number', 'N/A')}]\n변경점 요약: {d.get('comparison_text', '')}")
+
+        return "\n\n---\n\n".join(history_chunks)
+
+
     system_instruction = """
     당신은 글로벌 규제기관(FDA, EMA, ICH 등)의 규정과 바이오시밀러 인허가에 정통한 30년 경력의 RA 최고 전문가입니다.
 
     [검색 도구 활용 및 데이터 연계 원칙 (Self-Querying)]
-    사용자 질문 분석 시 `search_guideline_database`를 호출하여 변수를 분리하십시오.
-    - 예시 1: "Health Canada의 PERs 가이드라인에서 제조공정 변경 기준은?" -> content_query="제조공정 변경 기준", target_agency="Health Canada", target_title_keyword="PERs"
-    - 예시 2: "바이오시밀러 임상 3상 면제 조건" -> content_query="바이오시밀러 임상 3상 면제 조건", target_agency=null, target_title_keyword=null
-
+    사용자 질문 분석 시 목적에 맞는 도구를 호출하십시오.
+    - 일반 규정 검색: `search_guideline_database` 호출
+    - 개정 이력, 변경점, 특정 시점 이후의 타임라인 분석: `get_document_change_history`를 우선 호출하여 DB의 과거 비교 데이터를 확인.
+    
     [지식 보완 (Knowledge Bridging)]
-    - 내부 DB 검색 결과(`search_guideline_database`)에 명시된 내용이 제한적인 경우, 통합된 구글 검색 도구를 호출하여 최신 규제 동향 및 전문가 컨센서스를 확보하십시오.
+    - 내부 DB 검색 결과(`search_guideline_database` 또는 `get_document_change_history`)에 명시된 내용이 제한적이거나, 질문에 명시된 특정 기간(예: 24년 10월 이후)의 최신 데이터가 DB에 없는 경우, 반드시 통합된 구글 검색 도구를 호출하여 최신 규제 동향 및 변경점을 확보하여 타임라인을 완성하십시오.
 
     [출력 및 서술 원칙]
     1. 비유, 과장, 아첨을 엄격히 금지합니다. 규제 조항과 사실관계에만 근거하여 객관적이고 담백하게 서술하십시오.
     2. 사용자의 질문에 대해 1을 유지하면서 최대한 자세하고 상세한 설명을 제공하십시오.
-    2. 정보 출처 구분: 내부 DB 데이터는 **[DB 참조]**로 표기하고 출처가 되는 원문의 내용을 기재하고, 구글 웹 검색을 통해 보완된 데이터는 **[웹 참조]**로 표기하여 시각적으로 완전히 분리하십시오.
-    3. 인용 자동화: DB 내용과 웹 검색 내용을 인용할 때, 제공된 컨텍스트의 출처 URL 및 문서명을 답변의 마지막에 명시하십시오.
-    4. 언어: 한국어 존댓말을 사용하며, 정보의 체계적 전달을 위해 글머리 기호 및 표를 활용하십시오.
+    3. 정보 출처 구분: 내부 DB 데이터는 **[DB 참조]**로 표기하고 출처가 되는 원문의 내용을 기재하며, 구글 웹 검색을 통해 보완된 데이터는 **[웹 참조]**로 표기하여 시각적으로 완전히 분리하십시오. 타임라인 설명 시 각 시점별 데이터 출처를 명확히 하십시오.
+    4. 인용 자동화: DB 내용과 웹 검색 내용을 인용할 때, 제공된 컨텍스트의 출처 URL 및 문서명을 답변의 마지막에 명시하십시오.
+    5. 언어: 한국어 존댓말을 사용하며, 정보의 체계적 전달을 위해 글머리 기호 및 표를 활용하십시오.
     """
 
     try:
         tools = [
             search_guideline_database, 
             get_recent_documents, 
+            get_document_change_history, # 개정 이력 조회 도구 추가
             types.Tool(google_search=types.GoogleSearch())
         ]
 
