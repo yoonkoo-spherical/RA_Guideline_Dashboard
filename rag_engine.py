@@ -223,15 +223,13 @@ def ask_guideline(user_query: str):
             types.Tool(google_search=types.GoogleSearch())
         ]
 
+        # 오류 수정: tool_config 파라미터 제거
         chat = client.chats.create(
             model=REASONING_MODEL,
             config=types.GenerateContentConfig(
                 system_instruction=system_instruction,
                 temperature=0.1, 
-                tools=tools,
-                tool_config=types.ToolConfig(
-                    include_server_side_tool_invocations=True
-                )
+                tools=tools
             )
         )
         
@@ -314,6 +312,7 @@ def compare_multiple_documents(docs_info, user_query: str = "위 문서들을 �
 
         prompt = f"질문/요청: {user_query}\n\n[분석 대상 문서들]\n{docs_text}"
 
+        # 오류 수정: tool_config 파라미터 제거
         def _generate_comparison():
             return client.models.generate_content(
                 model=REASONING_MODEL,
@@ -321,10 +320,7 @@ def compare_multiple_documents(docs_info, user_query: str = "위 문서들을 �
                 config=types.GenerateContentConfig(
                     system_instruction=system_instruction,
                     temperature=0.0, 
-                    tools=[types.Tool(google_search=types.GoogleSearch())],
-                    tool_config=types.ToolConfig(
-                        include_server_side_tool_invocations=True
-                    )
+                    tools=[types.Tool(google_search=types.GoogleSearch())]
                 )
             )
 
