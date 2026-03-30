@@ -65,18 +65,34 @@ def extract_text_with_ocr(file_path):
 def search_agency_guidelines(agency, site_domain):
     """검색 쿼리 및 결과 수를 확장하여 검색 수행"""
     if not SERPER_API_KEY:
-        print("Serper API Key missing.")
+        print(f"[{agency}] Serper API Key가 환경 변수에서 로드되지 않았습니다.")
         return []
 
-    # 쿼리 강화: filetype:pdf 제거하여 HTML 결과도 수집
-    query = f'site:{site_domain} "biosimilar" (guidance OR guideline OR draft OR submission OR requirement OR information)'
+    # 검색 쿼리를 단순화하여 테스트 (괄호 제거)
+    query = f'site:{site_domain} biosimilar guidance OR guideline OR draft OR submission'
+    
     url = "https://google.serper.dev/search"
-    payload = json.dumps({"q": query, "num": 30})
-    headers = {'X-API-KEY': SERPER_API_KEY, 'Content-Type': 'application/json'}
+    
+    # num을 안전하게 10으로 낮추어 테스트
+    payload = json.dumps({
+        "q": query, 
+        "num": 10 
+    })
+    
+    headers = {
+        'X-API-KEY': str(SERPER_API_KEY).strip(), # 공백 제거 및 문자열 확정
+        'Content-Type': 'application/json'
+    }
 
     try:
         response = requests.post(url, headers=headers, data=payload, timeout=30)
-        response.raise_for_status()
+        
+        # 400 에러 시 서버의 응답 본문을 출력하여 원인 파악
+        if response.status_code != 200:
+            print(f"[{agency}] API 오류 발생: {response.status_code}")
+            print(f"상세 내용: {response.text}") # 이 부분이 핵심입니다.
+            return []
+            
         return [{
             "agency": agency,
             "title": item.get('title', ''),
@@ -84,7 +100,7 @@ def search_agency_guidelines(agency, site_domain):
             "url": item.get('link', '')
         } for item in response.json().get('organic', [])]
     except Exception as e:
-        print(f"[{agency}] 검색 오류: {e}")
+        print(f"[{agency}] 네트워크 또는 실행 오류: {e}")
         return []
 
 def filter_links_with_llm(links):
