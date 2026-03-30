@@ -76,7 +76,7 @@ def search_agency_guidelines(agency, site_domain):
     # num을 안전하게 10으로 낮추어 테스트
     payload = json.dumps({
         "q": query, 
-        "num": 10 
+        "num": 30 
     })
     
     headers = {
