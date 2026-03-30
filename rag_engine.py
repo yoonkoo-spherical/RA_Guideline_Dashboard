@@ -22,7 +22,7 @@ except Exception as e:
 # Gemini SDK 클라이언트 초기화
 client = genai.Client(api_key=GEMINI_API_KEY)
 
-REASONING_MODEL = "gemini-3.1-pro-preview"
+REASONING_MODEL = "gemini-2.5-pro"
 FAST_MODEL = "gemini-3.1-flash"
 EMBEDDING_MODEL = "gemini-embedding-001"
 
