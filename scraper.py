@@ -307,12 +307,39 @@ def process_document(link, deleted_urls):
         except Exception as e:
             print(f"   -> HTML 파싱 실패: {e}")
 
+def process_pending_urls(deleted_urls):
+    print("\n--- [Web Discovered] 챗봇이 발견한 외부 대기열 URL 수집 시작 ---")
+    try:
+        res = supabase.table("pending_urls").select("*").execute()
+        pending_items = res.data
+        if not pending_items:
+            print(" -> 대기 중인 URL이 없습니다.")
+            return
+
+        for item in pending_items:
+            print(f"\n[대상-Web] {item['title']} ({item['url']})")
+            link = {
+                "title": item['title'],
+                "agency": item['agency'],
+                "url": item['url']
+            }
+            process_document(link, deleted_urls)
+            
+            # 처리 시도 후 대기열에서 제거 (성공 여부 무관)
+            supabase.table("pending_urls").delete().eq("id", item['id']).execute()
+            time.sleep(random.uniform(2, 4))
+    except Exception as e:
+        print(f" -> 대기 URL 처리 중 오류: {e}")
+
 def run_scraper():
     print("--- 지능형 규제 가이드라인 수집기 가동 ---")
-    
+
     deleted_urls = get_deleted_urls()
     if deleted_urls:
         print(f"--- 수동 삭제(블랙리스트) 문서 {len(deleted_urls)}건 로드 완료 ---")
+
+    # 1. 챗봇이 발견한 보류 URL 우선 처리
+    process_pending_urls(deleted_urls)
 
     agencies = [
         {"name": "FDA", "domain": "fda.gov"},
