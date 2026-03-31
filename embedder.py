@@ -30,7 +30,6 @@ def clean_and_chunk_text(text, chunk_size=1000, overlap=100):
 def process_embeddings():
     print("--- Starting Document Embedding (DB Text Reader Mode) ---")
     
-    # 메타데이터 추출을 위해 agency, category 추가
     all_docs = supabase.table("guidelines").select("url, title, agency, category, raw_text").not_.is_("raw_text", "null").not_.ilike("raw_text", "%추출 불가%").execute().data
     
     print("--- 기존 임베딩 완료 문서 개별 확인 중 (1000 한계 우회) ---")
@@ -53,8 +52,8 @@ def process_embeddings():
     for target_doc in unprocessed_docs:
         print(f"\nProcessing: {target_doc['title']}")
         
-        # 메타데이터 헤더 생성
-        agency = target_doc.get('agency') or 'N/A'
+        # 규제기관명 정규화 (필터링 매칭률 향상 목적)
+        agency = str(target_doc.get('agency') or 'N/A').strip().upper()
         title = target_doc.get('title') or 'N/A'
         category = target_doc.get('category') or 'N/A'
         meta_header = f"[기관: {agency}]\n[문서명: {title}]\n[분류: {category}]\n본문: "
