@@ -196,7 +196,6 @@ def main():
     now = datetime.now()
     st.sidebar.header(f"💰 {now.year}년 {now.month}월 API 토큰 현황")
     
-    # 지연 업데이트를 위한 사이드바 플레이스홀더 생성
     token_display_placeholder = st.sidebar.empty()
 
     tab_search, tab_old_new, tab_multi, tab_chat, tab_history, tab_upload = st.tabs([
@@ -300,8 +299,16 @@ def main():
         st.markdown("#### ⚖️ 다중 문서 수동 비교 분석")
         embedded_only_df = filtered_df[filtered_df['status_score'] == 4].copy() 
 
+        # 다중 문서 비교 탭 내 검색 기능 (OR 조건)
+        multi_search_query = st.text_input("비교할 문서 검색 (쉼표(,)로 구분하여 다중 OR 검색 가능)", "")
+        if multi_search_query:
+            keywords = [kw.strip() for kw in multi_search_query.split(",") if kw.strip()]
+            if keywords:
+                pattern = '|'.join(map(re.escape, keywords))
+                embedded_only_df = embedded_only_df[embedded_only_df['title'].str.contains(pattern, case=False, na=False)]
+
         if embedded_only_df.empty:
-            st.info("임베딩 및 요약이 정상적으로 완료된 문서가 없습니다.")
+            st.info("임베딩 및 요약이 정상적으로 완료된 문서가 없거나 검색 조건에 맞는 문서가 없습니다.")
         else:
             embedded_only_df['상태'] = "🟢 준비 완료"
             df_for_selection = embedded_only_df[[ 'agency', 'category','title', '상태', 'url']].copy()
@@ -335,39 +342,51 @@ def main():
 
     with tab_chat:
         st.markdown("#### 규제 가이드라인 AI 어시스턴트 (Guideline Chatbot)")
-        if "messages" not in st.session_state: st.session_state.messages = []
 
+        if "messages" not in st.session_state:
+            st.session_state.messages = []
+        if "chat_input_val" not in st.session_state:
+            st.session_state.chat_input_val = ""
+        if "current_prompt" not in st.session_state:
+            st.session_state.current_prompt = None
+
+        def submit_chat():
+            if st.session_state.chat_input_val.strip():
+                st.session_state.current_prompt = st.session_state.chat_input_val
+                st.session_state.chat_input_val = ""
+
+        # 채팅 입력창 상단 고정
+        st.text_input("질문을 입력하세요 (Enter로 전송):", key="chat_input_val", on_change=submit_chat)
+        st.divider()
+
+        if st.session_state.current_prompt:
+            prompt = st.session_state.current_prompt
+            st.session_state.current_prompt = None
+
+            # User 메시지를 최상단(Index 0)에 삽입
+            st.session_state.messages.insert(0, {"role": "user", "content": prompt})
+            save_chat_to_db("user", prompt)
+
+            with st.spinner("답변 생성 중..."):
+                try:
+                    response_text, sources = rag_engine.ask_guideline(prompt)
+                    if "답변 생성 오류" in response_text or "질문 분석 실패" in response_text:
+                        st.error("AI가 답변을 생성하지 못했습니다. (API 할당량 초과 또는 네트워크 오류)")
+                    else:
+                        # Assistant 메시지를 User 메시지 위(Index 0)에 삽입하여 최상단 노출
+                        st.session_state.messages.insert(0, {"role": "assistant", "content": response_text, "sources": sources})
+                        save_chat_to_db("assistant", response_text)
+                except Exception:
+                    st.error("예기치 않은 시스템 오류가 발생했습니다. 잠시 후 다시 시도해 주십시오.")
+
+        # 메시지 역순 렌더링 (최신 내용이 항상 상단에 표시됨)
         for message in st.session_state.messages:
-            with st.chat_message(message["role"]): 
+            with st.chat_message(message["role"]):
                 st.markdown(message["content"])
                 if message["role"] == "assistant" and message.get("sources"):
                     with st.expander("🔍 AI가 참고한 원문 조각 확인"):
                         for i, source in enumerate(message["sources"]):
                             st.markdown(f"**[{i+1}] 출처:** [{source['url']}]({source['url']})")
-
-        if prompt := st.chat_input("질문을 입력하세요."):
-            st.session_state.messages.append({"role": "user", "content": prompt})
-            save_chat_to_db("user", prompt)
-
-            with st.chat_message("user"): st.markdown(prompt)
-
-            with st.chat_message("assistant"):
-                with st.spinner("답변 생성 중..."):
-                    try:
-                        response_text, sources = rag_engine.ask_guideline(prompt)
-                        if "답변 생성 오류" in response_text or "질문 분석 실패" in response_text:
-                            st.error("AI가 답변을 생성하지 못했습니다. (API 할당량 초과 또는 네트워크 오류)")
-                        else:
-                            st.markdown(response_text)
-                            if sources:
-                                with st.expander("🔍 AI가 참고한 원문 조각 확인"):
-                                    for i, source in enumerate(sources):
-                                        st.markdown(f"**[{i+1}] 출처:** [{source['url']}]({source['url']})")
-
-                            st.session_state.messages.append({"role": "assistant", "content": response_text, "sources": sources})
-                            save_chat_to_db("assistant", response_text)
-                    except Exception:
-                        st.error("예기치 않은 시스템 오류가 발생했습니다. 잠시 후 다시 시도해 주십시오.")
 
     with tab_history:
         st.markdown("#### 🗂️ Chatbot 및 분석 전체 이력")
@@ -548,8 +567,6 @@ def main():
             else:
                 st.warning("PDF 파일을 첨부하고 카테고리를 입력해 주십시오.")
 
-    # 스크립트 최하단에서 최신 토큰 상태를 조회하여 사이드바의 플레이스홀더 업데이트
-    # 이를 통해 하위 로직에서 발생한 토큰 소모량이 화면에 즉시 반영됩니다.
     in_tokens, out_tokens, est_cost = get_token_stats()
     with token_display_placeholder.container():
         st.write(f"- 누적 입력 토큰: **{in_tokens:,}**")
