@@ -79,7 +79,6 @@ def extract_text_with_ocr(file_path):
 
 def request_with_retry(url, max_retries=3):
     wait_time = 5
-    # 세션을 유지하여 봇 검증 통과 시 발급되는 쿠키 활용
     session = curl_requests.Session()
     proxies = {"http": PROXY_URL, "https": PROXY_URL} if PROXY_URL else None
 
@@ -87,7 +86,7 @@ def request_with_retry(url, max_retries=3):
         try:
             time.sleep(random.uniform(3.0, 7.0))
             profile = random.choice(IMPERSONATE_PROFILES)
-            
+
             res = session.get(
                 url, 
                 impersonate=profile, 
@@ -104,7 +103,7 @@ def request_with_retry(url, max_retries=3):
 
             res.raise_for_status()
             return res
-            
+
         except Exception as e:
             error_msg = str(e)
             if "INTERNAL_ERROR" in error_msg or "time" in error_msg.lower():
@@ -124,7 +123,7 @@ def request_with_retry(url, max_retries=3):
 
             if attempt == max_retries - 1:
                 return None
-            
+
             time.sleep(wait_time)
             wait_time *= 2
     return None
@@ -157,12 +156,10 @@ def search_agency_guidelines(agency, site_domain):
         return []
 
 def search_alternative_pdf_via_serper(title, original_domain):
-    """대상 도메인 접속 불가 시 Serper API를 사용하여 다른 도메인에 업로드된 동일 PDF 탐색"""
     if not SERPER_API_KEY:
         return None
 
     print(f"   [!] 원본 서버 접근 불가. Serper API로 대체 PDF 링크 검색 시도...")
-    # 원본 도메인을 제외하고 해당 제목의 PDF 파일 검색
     query = f'"{title}" filetype:pdf -site:{original_domain}'
     url = "https://google.serper.dev/search"
     payload = json.dumps({"q": query, "num": 3})
@@ -207,15 +204,28 @@ def filter_links_with_llm(links):
         time.sleep(0.5)
     return valid_links
 
-def process_and_save_pdf(pdf_url, doc_info):
+def get_deleted_urls():
+    """사용자가 대시보드에서 수동으로 삭제한 블랙리스트 URL 목록을 조회합니다."""
+    try:
+        res = supabase.table("deleted_docs").select("url").execute()
+        return {item['url'] for item in res.data}
+    except Exception as e:
+        print(f"삭제 목록 조회 실패: {e}")
+        return set()
+
+def process_and_save_pdf(pdf_url, doc_info, deleted_urls):
+    if pdf_url in deleted_urls:
+        print(f"   -> [Skip] 수동 삭제된 문서(블랙리스트): {pdf_url}")
+        return True # 이미 처리된 것으로 간주하여 추가 다운로드 방지
+
     try:
         existing = supabase.table("guidelines").select("url").eq("url", pdf_url).execute()
         if existing.data:
-            return True # 이미 존재함
+            return True 
 
         res = request_with_retry(pdf_url)
         if not res: 
-            return False # 다운로드 실패
+            return False 
 
         print(f"   -> 다운로드 성공: {pdf_url}")
         with tempfile.NamedTemporaryFile(delete=False, suffix=".pdf") as temp_pdf:
@@ -239,33 +249,35 @@ def process_and_save_pdf(pdf_url, doc_info):
         print(f"   -> 처리 오류: {e}")
         return False
 
-def download_and_save(pdf_url, doc_info):
-    success = process_and_save_pdf(pdf_url, doc_info)
-    
-    # 다운로드 실패 시 Serper API를 활용한 폴백 로직 실행
+def download_and_save(pdf_url, doc_info, deleted_urls):
+    success = process_and_save_pdf(pdf_url, doc_info, deleted_urls)
+
     if not success:
         domain = urlparse(pdf_url).netloc
         alt_url = search_alternative_pdf_via_serper(doc_info['title'], domain)
         if alt_url:
             print(f"   -> 대체 PDF 링크 발견: {alt_url}")
-            process_and_save_pdf(alt_url, doc_info)
+            process_and_save_pdf(alt_url, doc_info, deleted_urls)
         else:
             print("   -> 대체 PDF 링크를 찾지 못했습니다.")
 
-def process_document(link):
+def process_document(link, deleted_urls):
     url = link['url']
+    if url in deleted_urls:
+        print(f"   -> [Skip] 수동 삭제된 문서(블랙리스트): {url}")
+        return
+
     if url.lower().endswith('.pdf'):
-        download_and_save(url, link)
+        download_and_save(url, link, deleted_urls)
     else:
         res = request_with_retry(url)
-        
-        # HTML 페이지 자체 접근 실패 시 문서 제목으로 PDF 직접 검색 (Fallback)
+
         if not res:
             domain = urlparse(url).netloc
             alt_url = search_alternative_pdf_via_serper(link['title'], domain)
             if alt_url:
                 print(f"   -> HTML 접근 불가. 대체 PDF 링크 발견: {alt_url}")
-                process_and_save_pdf(alt_url, link)
+                process_and_save_pdf(alt_url, link, deleted_urls)
             else:
                 print(f"   -> 최종 요청 실패 및 대체 탐색 불가: {url}")
             return
@@ -273,11 +285,11 @@ def process_document(link):
         try:
             soup = BeautifulSoup(res.text, 'html.parser')
             pdf_links = []
-            
+
             for a in soup.find_all('a', href=True):
                 href = a['href'].lower()
                 text = a.get_text().lower()
-                
+
                 if '.pdf' in href:
                     pdf_links.append(urljoin(url, a['href']))
                 elif '/media/' in href and '/download' in href:
@@ -289,7 +301,7 @@ def process_document(link):
             if unique_pdfs:
                 print(f"   -> HTML 내 {len(unique_pdfs)}개의 PDF 발견")
                 for pdf_url in unique_pdfs[:3]:
-                    download_and_save(pdf_url, link)
+                    download_and_save(pdf_url, link, deleted_urls)
             else:
                 print(f"   -> HTML 내 PDF 링크 없음")
         except Exception as e:
@@ -297,6 +309,10 @@ def process_document(link):
 
 def run_scraper():
     print("--- 지능형 규제 가이드라인 수집기 가동 ---")
+    
+    deleted_urls = get_deleted_urls()
+    if deleted_urls:
+        print(f"--- 수동 삭제(블랙리스트) 문서 {len(deleted_urls)}건 로드 완료 ---")
 
     agencies = [
         {"name": "FDA", "domain": "fda.gov"},
@@ -320,7 +336,7 @@ def run_scraper():
     print("\n--- 문서 수집 및 분석 시작 ---")
     for link in all_links:
         print(f"\n[대상] {link['title']}")
-        process_document(link)
+        process_document(link, deleted_urls)
         time.sleep(random.uniform(3, 6))
 
     print("\n--- 모든 수집 작업 종료 ---")
