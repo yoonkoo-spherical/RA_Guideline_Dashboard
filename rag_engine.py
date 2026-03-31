@@ -71,11 +71,20 @@ def analyze_intent_and_extract_params(user_query: str) -> dict:
     prompt = f"""
     사용자 질의를 분석하여 내부 DB 검색을 위한 파라미터를 추출하십시오.
     결과는 반드시 아래 JSON 형식으로만 출력하십시오.
+    
+    [추출 가이드]
+    1. search_queries: 문서 본문을 검색할 핵심 키워드입니다. 한국어 질의의 경우 영문 키워드로 번역한 것을 반드시 포함하십시오. (예: ["pharmacokinetics monoclonal antibodies", "약동학적 관점"])
+    2. target_agency: 질의에 언급된 규제 기관명을 다음 중 하나로 정확히 정규화하십시오: "FDA", "EMA", "MHRA", "Health Canada", "ICH", "MFDS". 해당하지 않거나 불분명하면 null을 반환하십시오. (예: "EU EMA" -> "EMA")
+    3. target_title: 질의에 특정 문서명(예: Similar biological medicinal products containing monoclonal antibodies)이 명시된 경우 이를 추출하십시오. 없으면 null입니다.
+    4. history_keyword: 개정 이력, 변경점 관련 질문일 경우 대상 문서 식별자(예: Q1A, PERs)를 추출하십시오. 없으면 null입니다.
+
     {{
         "search_queries": ["키워드조합1", "키워드조합2"],
-        "target_agency": "규제기관명(예: FDA) 또는 null",
-        "history_keyword": "개정 이력, 변경점, 타임라인 관련 질문일 경우 대상 문서 식별자(예: Q1A, PERs) 또는 null"
+        "target_agency": "정규화된 기관명 또는 null",
+        "target_title": "특정 문서명 또는 null",
+        "history_keyword": "개정 이력 식별자 또는 null"
     }}
+    
     질의: {user_query}
     """
     
@@ -93,14 +102,14 @@ def analyze_intent_and_extract_params(user_query: str) -> dict:
             params["search_queries"] = [user_query]
         return params
     except Exception:
-        return {"search_queries": [user_query], "target_agency": None, "history_keyword": None}
+        return {"search_queries": [user_query], "target_agency": None, "target_title": None, "history_keyword": None}
 
 def rerank_chunks(user_query: str, chunks: list[dict], top_n: int = 10) -> list[dict]:
     """검색된 청크들을 연관성 기준으로 재정렬합니다."""
     if not chunks:
         return []
     
-    chunks_text = "\n".join([f"[{i}] {c.get('content', '')[:200]}..." for i, c in enumerate(chunks)])
+    chunks_text = "\n".join([f"[{i}] {c.get('content', '')[:300]}..." for i, c in enumerate(chunks)])
     prompt = f"""
     질문: {user_query}
     다음 검색된 문서 청크들 중 질문에 답변하는 데 가장 관련성이 높은 청크의 번호를 연관성 순으로 최대 {top_n}개까지 나열하십시오.
@@ -153,16 +162,18 @@ def ask_guideline(user_query: str):
     # 일반 문서 청크 검색
     all_docs_map = {} 
     target_agency = params.get("target_agency")
+    target_title = params.get("target_title")
+    
     for q in params.get("search_queries", []):
         query_embedding = get_embedding(q)
         if query_embedding:
             try:
                 rpc_params = {
                     "query_embedding": query_embedding,
-                    "match_threshold": 0.4,
-                    "match_count": 15,
+                    "match_threshold": 0.25,  # 임계값 완화: 교차 언어 매칭 확률 증가
+                    "match_count": 30,        # 후보군 확장 후 Reranker에 위임
                     "filter_agency": target_agency,
-                    "filter_title": None
+                    "filter_title": target_title
                 }
                 search_res = supabase.rpc("match_document_chunks_with_filters", rpc_params).execute()
                 for d in search_res.data:
