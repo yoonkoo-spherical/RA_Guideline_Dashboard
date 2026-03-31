@@ -120,17 +120,13 @@ def get_agency_flag(agency):
     return flags.get(clean_agency, "🏳️")
 
 def delete_document_from_db(doc_url, doc_title):
-    """문서 및 임베딩 데이터를 DB에서 삭제하고 블랙리스트(deleted_docs)에 추가합니다."""
     try:
-        # 1. Scraper 제외 목록(블랙리스트)에 추가
         supabase.table("deleted_docs").insert({"url": doc_url, "title": doc_title}).execute()
     except Exception:
-        pass # 이미 블랙리스트에 존재하거나 예외가 발생하더라도 진행
+        pass 
 
     try:
-        # 2. 임베딩 청크 삭제 (무료 요금제 용량 관리)
         supabase.table("document_chunks").delete().eq("url", doc_url).execute()
-        # 3. 원본 문서 메타데이터 삭제
         supabase.table("guidelines").delete().eq("url", doc_url).execute()
         return True
     except Exception as e:
@@ -197,14 +193,11 @@ def main():
     selected_categories = st.sidebar.multiselect("키워드/카테고리", options=categories, default=categories)
     st.sidebar.divider()
 
-    # 요금 표시 화면 최신화 (현재 연도 및 월 기준)
     now = datetime.now()
     st.sidebar.header(f"💰 {now.year}년 {now.month}월 API 토큰 현황")
-    in_tokens, out_tokens, est_cost = get_token_stats()
-    st.sidebar.write(f"- 누적 입력 토큰: **{in_tokens:,}**")
-    st.sidebar.write(f"- 누적 출력 토큰: **{out_tokens:,}**")
-    st.sidebar.write(f"- 예상 과금액: **${est_cost:.2f}**")
-    st.sidebar.caption("※ 현재 API 모델(Flash) 유지 중. 향후 유료 요금제(Pro) 전환 시 실 과금액 추정치입니다.")
+    
+    # 지연 업데이트를 위한 사이드바 플레이스홀더 생성
+    token_display_placeholder = st.sidebar.empty()
 
     tab_search, tab_old_new, tab_multi, tab_chat, tab_history, tab_upload = st.tabs([
         "📄 문서 검색", 
@@ -269,12 +262,11 @@ def main():
                     st.markdown(f"[🔗 원본 문서 열기]({row['url']})")
                 
                 with col2:
-                    # 문서 및 관련 임베딩 데이터 삭제 버튼
                     if st.button("🗑️ 문서 수동 삭제", key=f"del_doc_{index}", help="이 문서와 관련된 임베딩 데이터가 영구 삭제되며, Scraper가 다시 수집하지 않습니다."):
                         with st.spinner("문서 및 임베딩 데이터를 삭제 중입니다..."):
                             if delete_document_from_db(row['url'], row['title']):
                                 st.success("문서가 성공적으로 삭제되었습니다.")
-                                load_data.clear() # 캐시 초기화
+                                load_data.clear()
                                 time.sleep(1)
                                 st.rerun()
 
@@ -555,6 +547,15 @@ def main():
                             st.error(f"업로드 에러: {e}")
             else:
                 st.warning("PDF 파일을 첨부하고 카테고리를 입력해 주십시오.")
+
+    # 스크립트 최하단에서 최신 토큰 상태를 조회하여 사이드바의 플레이스홀더 업데이트
+    # 이를 통해 하위 로직에서 발생한 토큰 소모량이 화면에 즉시 반영됩니다.
+    in_tokens, out_tokens, est_cost = get_token_stats()
+    with token_display_placeholder.container():
+        st.write(f"- 누적 입력 토큰: **{in_tokens:,}**")
+        st.write(f"- 누적 출력 토큰: **{out_tokens:,}**")
+        st.write(f"- 예상 과금액: **${est_cost:.2f}**")
+        st.caption("※ 현재 API 모델(Flash) 유지 중. 향후 유료 요금제(Pro) 전환 시 실 과금액 추정치입니다.")
 
 if __name__ == "__main__":
     main()
