@@ -136,6 +136,7 @@ def delete_document_from_db(doc_url, doc_title):
 def main():
     st.set_page_config(page_title="RA 가이드라인 대시보드", layout="wide")
 
+    # CSS 적용: 입력창 가시성 개선 (검은색 테두리 적용)
     st.markdown("""
     <style>
         .stMarkdown table {
@@ -159,6 +160,11 @@ def main():
         .stMarkdown li {
             margin-bottom: 8px;
             line-height: 1.6;
+        }
+        /* 텍스트 입력창 테두리 가시성 개선 */
+        .stTextInput div[data-baseweb="input"] {
+            border: 1px solid #1f1f1f !important;
+            border-radius: 4px !important;
         }
     </style>
     """, unsafe_allow_html=True)
@@ -279,7 +285,7 @@ def main():
                     st.info("AI 요약 대기 중입니다.")
 
                 if row['status_score'] == -1:
-                    st.warning("⚠️ 요약 텍스트가 없음에도 벡터 DB에 임베딩 데이터가 존재합니다. 과거의 잘못된 청크이거나 구조적 오류일 수 있습니다.")
+                    st.warning("⚠️ 요약 텍스트가 없음에도 벡터 DB에 임베딩 데이터가 존재합니다. 과거의 잘못된 청크이거나 구조적 오류일 수 일수 있습니다.")
                 elif not row['has_embedding']: 
                     st.warning("⚠️ RAG 검색용 벡터 DB에 임베딩되지 않은 문서입니다.")
 
@@ -299,7 +305,6 @@ def main():
         st.markdown("#### ⚖️ 다중 문서 수동 비교 분석")
         embedded_only_df = filtered_df[filtered_df['status_score'] == 4].copy() 
 
-        # 다중 문서 비교 탭 내 검색 기능 (OR 조건)
         multi_search_query = st.text_input("비교할 문서 검색 (쉼표(,)로 구분하여 다중 OR 검색 가능)", "")
         if multi_search_query:
             keywords = [kw.strip() for kw in multi_search_query.split(",") if kw.strip()]
@@ -355,7 +360,6 @@ def main():
                 st.session_state.current_prompt = st.session_state.chat_input_val
                 st.session_state.chat_input_val = ""
 
-        # 채팅 입력창 상단 고정
         st.text_input("질문을 입력하세요 (Enter로 전송):", key="chat_input_val", on_change=submit_chat)
         st.divider()
 
@@ -363,8 +367,8 @@ def main():
             prompt = st.session_state.current_prompt
             st.session_state.current_prompt = None
 
-            # User 메시지를 최상단(Index 0)에 삽입
-            st.session_state.messages.insert(0, {"role": "user", "content": prompt})
+            # 순차적으로 질문 추가
+            st.session_state.messages.append({"role": "user", "content": prompt})
             save_chat_to_db("user", prompt)
 
             with st.spinner("답변 생성 중..."):
@@ -372,21 +376,28 @@ def main():
                     response_text, sources = rag_engine.ask_guideline(prompt)
                     if "답변 생성 오류" in response_text or "질문 분석 실패" in response_text:
                         st.error("AI가 답변을 생성하지 못했습니다. (API 할당량 초과 또는 네트워크 오류)")
+                        st.session_state.messages.append({"role": "assistant", "content": "오류가 발생했습니다.", "sources": []})
                     else:
-                        # Assistant 메시지를 User 메시지 위(Index 0)에 삽입하여 최상단 노출
-                        st.session_state.messages.insert(0, {"role": "assistant", "content": response_text, "sources": sources})
+                        # 순차적으로 답변 추가
+                        st.session_state.messages.append({"role": "assistant", "content": response_text, "sources": sources})
                         save_chat_to_db("assistant", response_text)
                 except Exception:
                     st.error("예기치 않은 시스템 오류가 발생했습니다. 잠시 후 다시 시도해 주십시오.")
+                    st.session_state.messages.append({"role": "assistant", "content": "시스템 오류가 발생했습니다.", "sources": []})
 
-        # 메시지 역순 렌더링 (최신 내용이 항상 상단에 표시됨)
-        for message in st.session_state.messages:
-            with st.chat_message(message["role"]):
-                st.markdown(message["content"])
-                if message["role"] == "assistant" and message.get("sources"):
-                    with st.expander("🔍 AI가 참고한 원문 조각 확인"):
-                        for i, source in enumerate(message["sources"]):
-                            st.markdown(f"**[{i+1}] 출처:** [{source['url']}]({source['url']})")
+        # 메시지를 질문-답변 세트로 묶은 후 역순으로 렌더링 (최신 세트가 가장 위로)
+        pairs = []
+        for i in range(0, len(st.session_state.messages), 2):
+            pairs.append(st.session_state.messages[i:i+2])
+            
+        for pair in reversed(pairs):
+            for msg in pair:
+                with st.chat_message(msg["role"]):
+                    st.markdown(msg["content"])
+                    if msg["role"] == "assistant" and msg.get("sources"):
+                        with st.expander("🔍 AI가 참고한 원문 조각 확인"):
+                            for idx, source in enumerate(msg["sources"]):
+                                st.markdown(f"**[{idx+1}] 출처:** [{source['url']}]({source['url']})")
 
     with tab_history:
         st.markdown("#### 🗂️ Chatbot 및 분석 전체 이력")
@@ -572,7 +583,6 @@ def main():
         st.write(f"- 누적 입력 토큰: **{in_tokens:,}**")
         st.write(f"- 누적 출력 토큰: **{out_tokens:,}**")
         st.write(f"- 예상 과금액: **${est_cost:.2f}**")
-        st.caption("※ 현재 API 모델(Flash) 유지 중. 향후 유료 요금제(Pro) 전환 시 실 과금액 추정치입니다.")
 
 if __name__ == "__main__":
     main()
