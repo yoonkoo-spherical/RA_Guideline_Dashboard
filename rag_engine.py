@@ -27,7 +27,7 @@ FAST_MODEL = "gemini-3.1-flash"
 EMBEDDING_MODEL = "gemini-embedding-001"
 
 # Tier 1 환경 한도 준수를 위한 최대 전송 글자 수
-MAX_TOTAL_CHARS = 25000 
+MAX_TOTAL_CHARS = 35000 
 
 def execute_with_retry(api_call_func, max_retries=3):
     """API 호출 중 500, 503 또는 429 에러 발생 시 지수 백오프로 재시도하는 래퍼 함수입니다."""
