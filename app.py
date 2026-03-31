@@ -30,10 +30,9 @@ def load_data():
     comp_response = supabase.table("version_comparisons").select("*").execute()
     comp_df = pd.DataFrame(comp_response.data)
 
-    # Supabase 기본 1000 한계를 우회하여 페이징 단위로 모든 청크 URL 가져오기
     embedded_urls = set()
     page_size = 1000
-    for i in range(100):  # 최대 10만 개 청크까지 조회
+    for i in range(100):
         chunk_response = supabase.table("document_chunks").select("url").neq("content", "FAILED").range(i * page_size, (i + 1) * page_size - 1).execute()
         if not chunk_response.data:
             break
@@ -133,39 +132,52 @@ def delete_document_from_db(doc_url, doc_title):
         st.error(f"데이터베이스 삭제 중 오류 발생: {e}")
         return False
 
+# AI 답변에서 웹 출처를 찾아 대기열에 등록하는 함수
+def queue_web_discovered_urls(response_text):
+    # 1. 마크다운 형식 링크 추출: [Title](URL)
+    markdown_links = re.findall(r'\[([^\]]+)\]\((https?://[^\)]+)\)', response_text)
+    # 2. 일반 텍스트 형식 URL 추출
+    raw_urls = re.findall(r'(?<!\()(https?://[^\s\)\]]+)', response_text)
+    
+    discovered = []
+    for title, url in markdown_links:
+        discovered.append({"title": title, "url": url})
+        
+    extracted_urls = [u for t, u in markdown_links]
+    for url in raw_urls:
+        if url not in extracted_urls:
+            discovered.append({"title": "Web Discovered Source", "url": url})
+            
+    for item in discovered:
+        url = item['url']
+        title = item['title'][:200]
+        
+        try:
+            # 기존 가이드라인 DB에 존재하는지 확인
+            existing = supabase.table("guidelines").select("url").eq("url", url).execute()
+            if existing.data:
+                continue
+                
+            # 사용자가 수동 삭제한 블랙리스트에 존재하는지 확인
+            deleted = supabase.table("deleted_docs").select("url").eq("url", url).execute()
+            if deleted.data:
+                continue
+                
+            # 대기열에 삽입 (중복 시 에러 발생하나 pass 처리)
+            supabase.table("pending_urls").insert({"url": url, "title": title, "agency": "Web Search (AI)"}).execute()
+        except Exception:
+            pass
+
 def main():
     st.set_page_config(page_title="RA 가이드라인 대시보드", layout="wide")
 
-    # CSS 적용: 입력창 가시성 개선 (검은색 테두리 적용)
     st.markdown("""
     <style>
-        .stMarkdown table {
-            width: 100%;
-            border-collapse: collapse;
-            font-size: 14px;
-            table-layout: fixed;
-        }
-        .stMarkdown th, .stMarkdown td {
-            border: 1px solid #ddd !important;
-            padding: 12px !important;
-            text-align: left !important;
-            word-wrap: break-word !important;
-            white-space: normal !important;
-        }
-        .stMarkdown th {
-            background-color: #f4f6f8 !important;
-            font-weight: 600 !important;
-            color: #333 !important;
-        }
-        .stMarkdown li {
-            margin-bottom: 8px;
-            line-height: 1.6;
-        }
-        /* 텍스트 입력창 테두리 가시성 개선 */
-        .stTextInput div[data-baseweb="input"] {
-            border: 1px solid #1f1f1f !important;
-            border-radius: 4px !important;
-        }
+        .stMarkdown table { width: 100%; border-collapse: collapse; font-size: 14px; table-layout: fixed; }
+        .stMarkdown th, .stMarkdown td { border: 1px solid #ddd !important; padding: 12px !important; text-align: left !important; word-wrap: break-word !important; white-space: normal !important; }
+        .stMarkdown th { background-color: #f4f6f8 !important; font-weight: 600 !important; color: #333 !important; }
+        .stMarkdown li { margin-bottom: 8px; line-height: 1.6; }
+        .stTextInput div[data-baseweb="input"] { border: 1px solid #1f1f1f !important; border-radius: 4px !important; }
     </style>
     """, unsafe_allow_html=True)
 
@@ -190,10 +202,7 @@ def main():
 
     agencies = df['agency'].dropna().unique().tolist()
     selected_agencies = st.sidebar.multiselect(
-        "규제기관 (Agency)", 
-        options=agencies, 
-        default=agencies,
-        format_func=lambda x: f"{get_agency_flag(x)} {x}"
+        "규제기관 (Agency)", options=agencies, default=agencies, format_func=lambda x: f"{get_agency_flag(x)} {x}"
     )
     categories = df['category'].dropna().unique().tolist()
     selected_categories = st.sidebar.multiselect("키워드/카테고리", options=categories, default=categories)
@@ -201,16 +210,10 @@ def main():
 
     now = datetime.now()
     st.sidebar.header(f"💰 {now.year}년 {now.month}월 API 토큰 현황")
-    
     token_display_placeholder = st.sidebar.empty()
 
     tab_search, tab_old_new, tab_multi, tab_chat, tab_history, tab_upload = st.tabs([
-        "📄 문서 검색", 
-        "🔄 신/구버전 비교", 
-        "⚖️ 다중 문서 비교", 
-        "💬 Guideline Chatbot", 
-        "🗂️ 사용 이력", 
-        "📤 PDF 수동 업로드"
+        "📄 문서 검색", "🔄 신/구버전 비교", "⚖️ 다중 문서 비교", "💬 Guideline Chatbot", "🗂️ 사용 이력", "📤 PDF 수동 업로드"
     ])
 
     filtered_df = df[(df['agency'].isin(selected_agencies)) & (df['category'].isin(selected_categories))]
@@ -245,17 +248,12 @@ def main():
         st.subheader(f"검색 결과: {len(tab1_df)} 건")
 
         for index, row in tab1_df.iterrows():
-            if row['status_score'] == 4: 
-                status_icon = "🟢 [완료]"
-            elif row['status_score'] == 3: 
-                status_icon = "🟡 [요약 완료]"
-            elif row['status_score'] == -1: 
-                status_icon = "🔴 [오류: 데이터 불일치]"
+            if row['status_score'] == 4: status_icon = "🟢 [완료]"
+            elif row['status_score'] == 3: status_icon = "🟡 [요약 완료]"
+            elif row['status_score'] == -1: status_icon = "🔴 [오류: 데이터 불일치]"
             else:
-                if isinstance(row.get('ai_summary'), str) and "추출 불가" in row['ai_summary']:
-                    status_icon = "⚪ [추출 실패]"
-                else:
-                    status_icon = "⏳ [대기중]"
+                if isinstance(row.get('ai_summary'), str) and "추출 불가" in row['ai_summary']: status_icon = "⚪ [추출 실패]"
+                else: status_icon = "⏳ [대기중]"
 
             agency_flag = get_agency_flag(row['agency']) 
 
@@ -267,7 +265,7 @@ def main():
                     st.markdown(f"[🔗 원본 문서 열기]({row['url']})")
                 
                 with col2:
-                    if st.button("🗑️ 문서 수동 삭제", key=f"del_doc_{index}", help="이 문서와 관련된 임베딩 데이터가 영구 삭제되며, Scraper가 다시 수집하지 않습니다."):
+                    if st.button("🗑️ 문서 수동 삭제", key=f"del_doc_{index}"):
                         with st.spinner("문서 및 임베딩 데이터를 삭제 중입니다..."):
                             if delete_document_from_db(row['url'], row['title']):
                                 st.success("문서가 성공적으로 삭제되었습니다.")
@@ -277,22 +275,16 @@ def main():
 
                 st.divider()
                 st.markdown("#### 💡 AI 핵심 요약")
-                if row['has_summary']: 
-                    st.write(row['ai_summary'])
-                elif isinstance(row.get('ai_summary'), str) and "추출 불가" in row['ai_summary']: 
-                    st.error(row['ai_summary'])
-                else:
-                    st.info("AI 요약 대기 중입니다.")
+                if row['has_summary']: st.write(row['ai_summary'])
+                elif isinstance(row.get('ai_summary'), str) and "추출 불가" in row['ai_summary']: st.error(row['ai_summary'])
+                else: st.info("AI 요약 대기 중입니다.")
 
-                if row['status_score'] == -1:
-                    st.warning("⚠️ 요약 텍스트가 없음에도 벡터 DB에 임베딩 데이터가 존재합니다. 과거의 잘못된 청크이거나 구조적 오류일 수 일수 있습니다.")
-                elif not row['has_embedding']: 
-                    st.warning("⚠️ RAG 검색용 벡터 DB에 임베딩되지 않은 문서입니다.")
+                if row['status_score'] == -1: st.warning("⚠️ 요약 텍스트가 없음에도 벡터 DB에 임베딩 데이터가 존재합니다.")
+                elif not row['has_embedding']: st.warning("⚠️ RAG 검색용 벡터 DB에 임베딩되지 않은 문서입니다.")
 
     with tab_old_new:
         st.markdown("#### 🔄 규제 가이드라인 신/구버전 변경점 자동 비교")
-        if comp_df.empty:
-            st.info("현재 문서 간의 버전 업데이트(개정) 이력이 감지되지 않았습니다.")
+        if comp_df.empty: st.info("현재 문서 간의 버전 업데이트(개정) 이력이 감지되지 않았습니다.")
         else:
             for index, row in comp_df.iterrows():
                 db_added_date = convert_to_kst(row.get('created_at'))
@@ -334,8 +326,7 @@ def main():
                     with st.spinner("문서 대조 중..."):
                         try:
                             comparison_result = rag_engine.compare_multiple_documents(selected_docs_info)
-                            if "오류" in comparison_result:
-                                st.error("문서 비교 분석 중 오류가 발생했습니다. API 토큰 한도를 초과했을 수 있습니다.")
+                            if "오류" in comparison_result: st.error("문서 비교 분석 중 오류가 발생했습니다.")
                             else:
                                 cleaned_result = clean_html_tags(comparison_result)
                                 save_analysis_to_db(selected_docs_info, cleaned_result)
@@ -348,12 +339,9 @@ def main():
     with tab_chat:
         st.markdown("#### 규제 가이드라인 AI 어시스턴트 (Guideline Chatbot)")
 
-        if "messages" not in st.session_state:
-            st.session_state.messages = []
-        if "chat_input_val" not in st.session_state:
-            st.session_state.chat_input_val = ""
-        if "current_prompt" not in st.session_state:
-            st.session_state.current_prompt = None
+        if "messages" not in st.session_state: st.session_state.messages = []
+        if "chat_input_val" not in st.session_state: st.session_state.chat_input_val = ""
+        if "current_prompt" not in st.session_state: st.session_state.current_prompt = None
 
         def submit_chat():
             if st.session_state.chat_input_val.strip():
@@ -367,25 +355,26 @@ def main():
             prompt = st.session_state.current_prompt
             st.session_state.current_prompt = None
 
-            # 순차적으로 질문 추가
             st.session_state.messages.append({"role": "user", "content": prompt})
             save_chat_to_db("user", prompt)
 
-            with st.spinner("답변 생성 중..."):
+            with st.spinner("답변 생성 중... (외부 규정 참조 시 대기열에 자동 등록됩니다)"):
                 try:
                     response_text, sources = rag_engine.ask_guideline(prompt)
-                    if "답변 생성 오류" in response_text or "질문 분석 실패" in response_text:
-                        st.error("AI가 답변을 생성하지 못했습니다. (API 할당량 초과 또는 네트워크 오류)")
+                    if "오류가 발생" in response_text:
+                        st.error("AI가 답변을 생성하지 못했습니다.")
                         st.session_state.messages.append({"role": "assistant", "content": "오류가 발생했습니다.", "sources": []})
                     else:
-                        # 순차적으로 답변 추가
                         st.session_state.messages.append({"role": "assistant", "content": response_text, "sources": sources})
                         save_chat_to_db("assistant", response_text)
+                        
+                        # 큐에 웹 발견 URL 등록 실행
+                        queue_web_discovered_urls(response_text)
+                        
                 except Exception:
-                    st.error("예기치 않은 시스템 오류가 발생했습니다. 잠시 후 다시 시도해 주십시오.")
+                    st.error("예기치 않은 시스템 오류가 발생했습니다.")
                     st.session_state.messages.append({"role": "assistant", "content": "시스템 오류가 발생했습니다.", "sources": []})
 
-        # 메시지를 질문-답변 세트로 묶은 후 역순으로 렌더링 (최신 세트가 가장 위로)
         pairs = []
         for i in range(0, len(st.session_state.messages), 2):
             pairs.append(st.session_state.messages[i:i+2])
@@ -395,9 +384,9 @@ def main():
                 with st.chat_message(msg["role"]):
                     st.markdown(msg["content"])
                     if msg["role"] == "assistant" and msg.get("sources"):
-                        with st.expander("🔍 AI가 참고한 원문 조각 확인"):
+                        with st.expander("🔍 AI가 참고한 내부 DB 문서 확인"):
                             for idx, source in enumerate(msg["sources"]):
-                                st.markdown(f"**[{idx+1}] 출처:** [{source['url']}]({source['url']})")
+                                st.markdown(f"**[{idx+1}] 출처:** [{source['title']}]({source['url']})")
 
     with tab_history:
         st.markdown("#### 🗂️ Chatbot 및 분석 전체 이력")
@@ -407,19 +396,9 @@ def main():
             chat_data = supabase.table("chat_history").select("*").order("created_at", desc=False).execute().data
             analysis_data = supabase.table("analysis_history").select("*").order("created_at", desc=True).execute().data
         except Exception:
-            st.error("이력 데이터를 불러오는 데 실패했습니다.")
             chat_data, analysis_data = [], []
 
-        css_style = """
-        <style>
-            body { font-family: 'Malgun Gothic', 'Apple SD Gothic Neo', sans-serif; line-height: 1.6; color: #333; max-width: 1000px; margin: 0 auto; padding: 30px; }
-            h1, h2, h3 { color: #0052cc; border-bottom: 1px solid #eee; padding-bottom: 8px; margin-top: 30px; }
-            table { border-collapse: collapse; width: 100%; margin: 20px 0; font-size: 0.95em; }
-            th, td { border: 1px solid #ddd; padding: 12px; text-align: left; vertical-align: top; }
-            th { background-color: #f0f2f6; font-weight: bold; color: #31333F; }
-            .date-stamp { color: #666; font-size: 0.9em; margin-bottom: 15px; }
-        </style>
-        """
+        css_style = """<style>body { font-family: sans-serif; padding: 30px; } h1, h2, h3 { color: #0052cc; border-bottom: 1px solid #eee; padding-bottom: 8px; } table { border-collapse: collapse; width: 100%; margin: 20px 0; } th, td { border: 1px solid #ddd; padding: 12px; } th { background-color: #f0f2f6; } .date-stamp { color: #666; font-size: 0.9em; margin-bottom: 15px; }</style>"""
 
         col1, col2 = st.columns(2)
 
@@ -434,24 +413,15 @@ def main():
 
                 for date_str in sorted(daily_chats.keys(), reverse=True):
                     chats_for_day = daily_chats[date_str]
-
                     md_chat = f"# {date_str} Guideline Chatbot 기록\n\n"
                     for chat, chat_time_kst in chats_for_day:
                         role_kr = "사용자" if chat['role'] == 'user' else "AI"
                         md_chat += f"### {role_kr}\n<div class='date-stamp'>작성일시: {chat_time_kst}</div>\n\n{chat['content']}\n\n---\n\n"
-
                     try:
                         html_chat_content = markdown.markdown(md_chat, extensions=['tables'])
                         final_html_chat = f"<!DOCTYPE html><html><head><meta charset='utf-8'>{css_style}</head><body>{html_chat_content}</body></html>"
-                        st.download_button(
-                            label=f"💾 {date_str} 채팅 기록 다운로드 (.html)", 
-                            data=final_html_chat, 
-                            file_name=f"guideline_chat_{date_str}.html", 
-                            mime="text/html",
-                            key=f"dl_chat_{date_str}"
-                        )
-                    except Exception:
-                        pass
+                        st.download_button(label=f"💾 {date_str} 채팅 기록 다운로드 (.html)", data=final_html_chat, file_name=f"guideline_chat_{date_str}.html", mime="text/html", key=f"dl_chat_{date_str}")
+                    except Exception: pass
 
                 st.divider()
                 st.write("▼ 채팅 내역 확인")
@@ -470,21 +440,11 @@ def main():
             if analysis_data:
                 for r in analysis_data:
                     file_title_prefix = "다중문서비교"
-                    doc_titles_list = []
-                    try:
-                        docs = json.loads(r['docs_info'])
-                        doc_titles_list = [f"- {d.get('title', 'Unknown')} ({d.get('agency', 'N/A')})" for d in docs]
-                        file_title_prefix = "_vs_".join([d.get('agency', 'NA') for d in docs]) + "_비교"
-                    except:
-                        pass
-
                     raw_time = convert_to_kst(r.get('created_at'))
                     safe_time = raw_time.replace(":", "").replace("-", "").replace(" ", "_")
                     file_name = f"{file_title_prefix}_{safe_time}.html"
 
                     md_analysis = f"# 다중 문서 수동 비교 분석 리포트\n\n<div class='date-stamp'>분석 일시: {raw_time}</div>\n\n"
-                    if doc_titles_list: md_analysis += f"**[분석 대상 문서]**<br>" + "<br>".join(doc_titles_list) + "\n\n<hr>\n\n"
-
                     cleaned_db_result = clean_html_tags(r.get('comparison_result', ''))
                     md_analysis += f"{cleaned_db_result}"
 
@@ -509,72 +469,24 @@ def main():
 
     with tab_upload:
         st.markdown("#### 📤 로컬 PDF 가이드라인 업로드")
-        st.write("PC 환경의 가이드라인 문서를 직접 업로드하여 데이터베이스에 추가하고, 분석 파이프라인을 즉시 가동합니다.")
-
         col1, col2 = st.columns(2)
-        with col1:
-            agency_input = st.selectbox("발행 기관 (Agency)", ["FDA", "EMA", "MHRA", "Health Canada", "ICH", "MFDS", "기타"])
-        with col2:
-            category_input = st.text_input("카테고리/키워드 (예: CMC, 임상, 비임상)")
+        with col1: agency_input = st.selectbox("발행 기관 (Agency)", ["FDA", "EMA", "MHRA", "Health Canada", "ICH", "MFDS", "기타"])
+        with col2: category_input = st.text_input("카테고리/키워드 (예: CMC, 임상, 비임상)")
 
-        uploaded_file = st.file_uploader("PDF 파일 선택 (드래그 앤 드롭 가능)", type="pdf")
+        uploaded_file = st.file_uploader("PDF 파일 선택", type="pdf")
 
-        def trigger_github_workflow():
-            try:
-                github_token = st.secrets.get("GITHUB_TOKEN")
-                github_repo = st.secrets.get("GITHUB_REPO")
-
-                if not github_token or not github_repo:
-                    return False, "GitHub 환경변수(Token/Repo)가 설정되지 않았습니다."
-
-                url = f"https://api.github.com/repos/{github_repo}/actions/workflows/schedule.yml/dispatches"
-                headers = {
-                    "Accept": "application/vnd.github+json",
-                    "Authorization": f"Bearer {github_token}",
-                    "X-GitHub-Api-Version": "2022-11-28"
-                }
-                data = {
-                    "ref": "main",
-                    "inputs": {"skip_scraping": "true"}                
-                }
-
-                response = requests.post(url, headers=headers, json=data)
-
-                if response.status_code == 204:
-                    return True, "성공"
-                else:
-                    return False, f"API 거부: {response.status_code} - {response.text}"
-            except Exception as e:
-                return False, str(e)
-
-        if st.button("데이터베이스 추가 및 분석 파이프라인 가동", type="primary"):
+        if st.button("데이터베이스 추가", type="primary"):
             if uploaded_file is not None and category_input:
-                with st.spinner("파일 업로드 및 파이프라인을 호출하는 중입니다..."):
+                with st.spinner("파일 업로드 중입니다..."):
                     file_name = uploaded_file.name
                     file_bytes = uploaded_file.read()
                     try:
                         supabase.storage.from_("guidelines_pdf").upload(file_name, file_bytes)
                         file_url = supabase.storage.from_("guidelines_pdf").get_public_url(file_name)
-
-                        supabase.table("guidelines").insert({
-                            "title": file_name,
-                            "agency": agency_input,
-                            "category": category_input,
-                            "url": file_url
-                        }).execute()
-                        st.success("데이터베이스 추가 완료!")
-
-                        trigger_success, trigger_msg = trigger_github_workflow()
-                        if trigger_success:
-                            st.info("✅ 백그라운드 분석 파이프라인(텍스트 추출 ➡️ 요약 ➡️ 임베딩)이 시작되었습니다. 작업 완료 시 대시보드에 자동으로 반영됩니다.")
-                        else:
-                            st.warning(f"⚠️ 파이프라인 즉시 호출에 실패했습니다. (매일 자정 정기 스케줄에 의해 일괄 처리됩니다): {trigger_msg}")
-
+                        supabase.table("guidelines").insert({"title": file_name, "agency": agency_input, "category": category_input, "url": file_url}).execute()
+                        st.success("데이터베이스 추가 완료! 스케줄러에 의해 자동으로 분석 파이프라인이 실행됩니다.")
                     except Exception as e:
-                        if "Duplicate" in str(e):
-                            st.error("이미 동일한 이름의 파일이 존재합니다. 파일명을 변경 후 다시 시도하십시오.")
-                        else:
-                            st.error(f"업로드 에러: {e}")
+                        st.error(f"업로드 에러: {e}")
             else:
                 st.warning("PDF 파일을 첨부하고 카테고리를 입력해 주십시오.")
 
@@ -583,6 +495,7 @@ def main():
         st.write(f"- 누적 입력 토큰: **{in_tokens:,}**")
         st.write(f"- 누적 출력 토큰: **{out_tokens:,}**")
         st.write(f"- 예상 과금액: **${est_cost:.2f}**")
+        st.caption("※ 현재 API 모델(Flash) 유지 중. 향후 유료 요금제(Pro) 전환 시 실 과금액 추정치입니다.")
 
 if __name__ == "__main__":
     main()
