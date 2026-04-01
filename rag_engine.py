@@ -27,6 +27,21 @@ EMBEDDING_MODEL = "gemini-embedding-001"
 
 MAX_TOTAL_CHARS = 35000 
 
+def log_usage(response, task_name):
+    """Gemini API 응답에서 토큰 사용량을 추출하여 DB에 실시간 기록합니다."""
+    try:
+        # response가 None이거나 usage_metadata가 없는 경우 방어 코드
+        if hasattr(response, 'usage_metadata') and response.usage_metadata:
+            usage = response.usage_metadata
+            supabase.table("token_usage").insert({
+                "model_name": REASONING_MODEL if "pro" in REASONING_MODEL else FAST_MODEL,
+                "input_tokens": usage.prompt_token_count,
+                "output_tokens": usage.candidates_token_count,
+                "task_name": task_name
+            }).execute()
+    except Exception as e:
+        print(f"Usage Logging Error ({task_name}): {e}")
+
 def execute_with_retry(api_call_func, max_retries=3):
     for attempt in range(max_retries):
         try:
