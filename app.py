@@ -132,6 +132,17 @@ def delete_document_from_db(doc_url, doc_title):
         st.error(f"데이터베이스 삭제 중 오류 발생: {e}")
         return False
 
+# URL 도메인 분석을 통해 기관명 자동 분류
+def infer_agency_from_url(url):
+    url_lower = url.lower()
+    if "fda.gov" in url_lower: return "FDA"
+    elif "ema.europa.eu" in url_lower: return "EMA"
+    elif "gov.uk" in url_lower: return "MHRA"
+    elif "canada.ca" in url_lower or "hc-sc.gc.ca" in url_lower: return "Health Canada"
+    elif "ich.org" in url_lower: return "ICH"
+    elif "mfds.go.kr" in url_lower: return "MFDS"
+    else: return "기타"
+
 # AI 답변에서 웹 출처를 찾아 대기열에 등록하는 함수
 def queue_web_discovered_urls(response_text):
     # 1. 마크다운 형식 링크 추출: [Title](URL)
@@ -151,6 +162,7 @@ def queue_web_discovered_urls(response_text):
     for item in discovered:
         url = item['url']
         title = item['title'][:200]
+        agency_inferred = infer_agency_from_url(url)
         
         try:
             # 기존 가이드라인 DB에 존재하는지 확인
@@ -163,8 +175,12 @@ def queue_web_discovered_urls(response_text):
             if deleted.data:
                 continue
                 
-            # 대기열에 삽입 (중복 시 에러 발생하나 pass 처리)
-            supabase.table("pending_urls").insert({"url": url, "title": title, "agency": "Web Search (AI)"}).execute()
+            # 대기열에 삽입
+            supabase.table("pending_urls").insert({
+                "url": url, 
+                "title": title, 
+                "agency": agency_inferred
+            }).execute()
         except Exception:
             pass
 
