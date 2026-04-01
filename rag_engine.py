@@ -19,242 +19,312 @@ try:
 except Exception as e:
     print(f"Supabase Client Error in rag_engine: {e}")
 
+# Gemini SDK 클라이언트 초기화
 client = genai.Client(api_key=GEMINI_API_KEY)
 
-# 모델 설정
 REASONING_MODEL = "gemini-2.5-pro"
 FAST_MODEL = "gemini-3.1-flash"
 EMBEDDING_MODEL = "gemini-embedding-001"
 
-# Tier 1 환경 한도 및 문맥 최적화를 위한 최대 글자 수
+# Tier 1 환경 한도 준수를 위한 최대 전송 글자 수
 MAX_TOTAL_CHARS = 35000 
 
-# ---------------------------------------------------------
-# 1. 유틸리티 함수 (로깅, 재시도, 임베딩)
-# ---------------------------------------------------------
-
-def log_usage(response, task_name):
-    """Gemini API 응답에서 토큰 사용량을 안전하게 추출하여 DB에 기록합니다."""
-    try:
-        if response and hasattr(response, 'usage_metadata') and response.usage_metadata:
-            usage = response.usage_metadata
-            # Pro 모델인지 Flash 모델인지 판별하여 기록
-            model_used = REASONING_MODEL if task_name in ["Chatbot", "Multi_Compare"] else FAST_MODEL
-            supabase.table("token_usage").insert({
-                "model_name": model_used,
-                "input_tokens": usage.prompt_token_count,
-                "output_tokens": usage.candidates_token_count,
-                "task_name": task_name
-            }).execute()
-    except Exception as e:
-        print(f"Usage Logging Error ({task_name}): {e}")
-
 def execute_with_retry(api_call_func, max_retries=3):
-    """지수 백오프를 적용한 API 호출 재시도 래퍼"""
+    """API 호출 중 500, 503 또는 429 에러 발생 시 지수 백오프로 재시도하는 래퍼 함수입니다."""
     for attempt in range(max_retries):
         try:
             return api_call_func()
         except Exception as e:
             error_msg = str(e)
-            if any(code in error_msg for code in ["503", "429", "UNAVAILABLE", "500", "INTERNAL"]):
+            if "503" in error_msg or "429" in error_msg or "UNAVAILABLE" in error_msg or "500" in error_msg or "INTERNAL" in error_msg:
                 if attempt < max_retries - 1:
                     sleep_time = 2 ** (attempt + 1)
+                    log_message = f"API 서버 지연/에러 발생. {sleep_time}초 후 재시도합니다... (시도: {attempt+1}/{max_retries-1})"
+
+                    print(log_message)
+
+                    try:
+                        st.toast(log_message, icon="⏳")
+                    except Exception:
+                        pass
+
                     time.sleep(sleep_time)
-                    continue
-            raise e
+                else:
+                    raise e
+            else:
+                raise e
 
 def get_embedding(text: str):
-    """텍스트를 벡터로 변환"""
+    """텍스트를 벡터 임베딩으로 변환합니다."""
     def _call_embed():
         return client.models.embed_content(model=EMBEDDING_MODEL, contents=text)
+
     try:
         response = execute_with_retry(_call_embed)
         return response.embeddings[0].values
-    except Exception:
+    except Exception as e:
+        print(f"Embedding error: {e}")
         return None
 
-# ---------------------------------------------------------
-# 2. 분석 및 검색 로직
-# ---------------------------------------------------------
-
-def analyze_intent_advanced(user_query: str) -> dict:
-    """의도 분석 및 다각도 검색 파라미터 생성 (개정 이력 및 특정 문서명 포함)"""
+def analyze_intent_and_extract_params(user_query: str) -> dict:
+    """사용자 질문을 분석하여 내부 DB 검색용 파라미터를 JSON으로 추출합니다."""
     prompt = f"""
-    사용자의 규제 질의를 분석하여 DB 검색용 JSON 파라미터를 생성하십시오.
+    사용자 질의를 분석하여 내부 DB 검색을 위한 파라미터를 추출하십시오.
+    단순한 단어의 나열(Keyword matching)이 아닌, 문서의 의미(Semantic) 기반으로 검색할 수 있도록 파라미터를 구성하십시오.
+    결과는 반드시 아래 JSON 형식으로만 출력하십시오.
     
     [추출 가이드]
-    1. expanded_queries: 한국어 질의를 영어 전문 용어로 확장한 질의문 2-3개.
-    2. target_agency: "FDA", "EMA", "ICH", "MHRA", "MFDS" 중 하나로 정규화 (없으면 null).
-    3. target_title: 언급된 특정 문서 제목이나 가이드라인 명칭.
-    4. history_keyword: 개정 이력, 변경점 관련 질문일 경우 대상 문서 번호(예: Q1A, Q5E).
+    1. search_queries: 규제 가이드라인은 주로 영문이므로, 사용자의 한국어 질의가 의미하는 바를 **자연어 형태의 영문 질의문(Question)**과 **핵심 개념을 포괄하는 영문 구문(Phrase)**으로 2~3개 생성하십시오. 
+       (예: "제조 공정 설비 변경 시 FDA 대응" -> ["post-approval manufacturing equipment changes FDA", "reporting categories for process equipment change biosimilar"])
+    2. target_agency: 질의에 언급된 규제 기관명을 다음 중 하나로 정확히 정규화하십시오: "FDA", "EMA", "MHRA", "Health Canada", "ICH", "MFDS". 해당하지 않거나 불분명하면 null을 반환하십시오.
+    3. target_title: 질의에 특정 문서명이 명시된 경우 이를 추출하십시오. 없으면 null입니다.
+    4. history_keyword: 개정 이력, 변경점 관련 질문일 경우 대상 문서 식별자를 추출하십시오. 없으면 null입니다.
 
     {{
-        "expanded_queries": [],
-        "target_agency": null,
-        "target_title": null,
-        "history_keyword": null
+        "search_queries": ["영문 의미 기반 검색어 1", "영문 의미 기반 검색어 2"],
+        "target_agency": "정규화된 기관명 또는 null",
+        "target_title": "특정 문서명 또는 null",
+        "history_keyword": "개정 이력 식별자 또는 null"
     }}
+    
     질의: {user_query}
     """
-    try:
-        response = execute_with_retry(lambda: client.models.generate_content(
-            model=FAST_MODEL,
-            contents=prompt,
-            config=types.GenerateContentConfig(temperature=0.0, response_mime_type="application/json")
-        ))
-        log_usage(response, "Intent_Analysis")
-        return json.loads(response.text)
-    except Exception:
-        return {"expanded_queries": [user_query], "target_agency": None, "target_title": None, "history_keyword": None}
 
-def rerank_chunks(user_query: str, chunks: list[dict], top_n: int = 15) -> list[dict]:
-    """LLM을 이용한 검색 결과 재정렬"""
-    if not chunks: return []
-    
-    input_list = "\n".join([f"ID:{i} | 내용:{c.get('content', '')[:250]}" for i, c in enumerate(chunks)])
-    prompt = f"질문: {user_query}\n\n위 질문에 답변하기 위해 가장 핵심적인 규제 조항을 담은 ID 15개를 중요도 순으로 나열하십시오. 결과는 오직 JSON 숫자 배열로만 출력하십시오.\n\n{input_list}"
-    
-    try:
-        res = execute_with_retry(lambda: client.models.generate_content(
+    def _call_analyze():
+        return client.models.generate_content(
             model=FAST_MODEL,
             contents=prompt,
             config=types.GenerateContentConfig(temperature=0.0, response_mime_type="application/json")
-        ))
-        log_usage(res, "Reranking")
-        indices = json.loads(res.text)
-        return [chunks[i] for i in indices if i < len(chunks)]
+        )
+
+    try:
+        response = execute_with_retry(_call_analyze)
+        params = json.loads(response.text)
+        if "search_queries" not in params or not isinstance(params["search_queries"], list):
+            params["search_queries"] = []
+        return params
+    except Exception:
+        return {"search_queries": [], "target_agency": None, "target_title": None, "history_keyword": None}
+
+def rerank_chunks(user_query: str, chunks: list[dict], top_n: int = 10) -> list[dict]:
+    """검색된 청크들을 연관성 기준으로 재정렬합니다."""
+    if not chunks:
+        return []
+
+    chunks_text = "\n".join([f"[{i}] {c.get('content', '')[:300]}..." for i, c in enumerate(chunks)])
+    prompt = f"""
+    질문: {user_query}
+    다음 검색된 문서 청크들 중 질문에 답변하는 데 가장 관련성이 높은 청크의 번호를 연관성 순으로 최대 {top_n}개까지 나열하십시오.
+    결과는 JSON 배열(숫자 리스트) 형식으로만 출력하십시오.
+    청크 목록:
+    {chunks_text}
+    """
+
+    def _call_rerank():
+        return client.models.generate_content(
+            model=FAST_MODEL,
+            contents=prompt,
+            config=types.GenerateContentConfig(temperature=0.0, response_mime_type="application/json")
+        )
+
+    try:
+        response = execute_with_retry(_call_rerank)
+        top_indices = json.loads(response.text)
+        return [chunks[i] for i in top_indices if i < len(chunks)]
     except Exception:
         return chunks[:top_n]
 
-# ---------------------------------------------------------
-# 3. 메인 비즈니스 함수 (Chatbot, Compare)
-# ---------------------------------------------------------
-
 def ask_guideline(user_query: str):
-    """챗봇 메인 로직 (DB 검색 + 개정 이력 + 웹 검색 보완)"""
     accessed_sources = []
     db_context_parts = []
-    all_chunks = {}
 
-    params = analyze_intent_advanced(user_query)
-    
-    # [기능 Merge] 개정 이력 우선 검색
-    h_kw = params.get("history_keyword")
-    if h_kw:
+    # 1단계: 내부 DB 사전 검색 수행
+    params = analyze_intent_and_extract_params(user_query)
+
+    # 개정 이력 검색 (필요한 경우)
+    history_keyword = params.get("history_keyword")
+    if history_keyword:
         try:
-            res = supabase.table("version_comparisons").select("*").or_(f"ref_number.ilike.%{h_kw}%,comparison_text.ilike.%{h_kw}%").execute()
-            if res.data:
-                history_txt = "\n".join([f"[개정정보: {d['ref_number']}] {d['comparison_text']}" for d in res.data])
-                db_context_parts.append(f"### 문서 개정 및 업데이트 이력\n{history_txt}")
-        except Exception: pass
+            res = supabase.table("version_comparisons").select("*").ilike("ref_number", f"%{history_keyword}%").order("created_at", desc=False).execute()
+            docs = res.data
+            if not docs:
+                res = supabase.table("version_comparisons").select("*").ilike("comparison_text", f"%{history_keyword}%").order("created_at", desc=False).execute()
+                docs = res.data
 
-    # 벡터 검색 수행
-    search_list = params.get("expanded_queries", []) + [user_query]
-    for q in search_list:
-        embedding = get_embedding(q)
-        if embedding:
+            if docs:
+                history_chunks = []
+                for d in docs:
+                    if d.get('new_url'): accessed_sources.append({"url": d['new_url']})
+                    date_str = d.get('created_at', '')[:10]
+                    history_chunks.append(f"-[DB 감지일: {date_str}, 식별자: {d.get('ref_number', 'N/A')}]\n변경점: {d.get('comparison_text', '')}")
+                db_context_parts.append("[문서 개정 이력 및 타임라인]\n" + "\n\n".join(history_chunks))
+        except Exception as e:
+            print(f"History search error: {e}")
+
+    # 일반 문서 청크 검색 (의미 기반 다중 쿼리 + 사용자 한국어 원문 쿼리 포함)
+    all_docs_map = {} 
+    target_agency = params.get("target_agency")
+    target_title = params.get("target_title")
+    
+    search_queries = params.get("search_queries", [])
+    if user_query not in search_queries:
+        search_queries.append(user_query) # 교차 언어 의미 검색을 위해 원문 질의 추가
+
+    for q in search_queries:
+        query_embedding = get_embedding(q)
+        if query_embedding:
             try:
-                res = supabase.rpc("match_document_chunks_with_filters", {
-                    "query_embedding": embedding,
-                    "match_threshold": 0.22, 
-                    "match_count": 25,
-                    "filter_agency": params.get("target_agency"),
-                    "filter_title": params.get("target_title")
-                }).execute()
-                for d in res.data: all_chunks[d['id']] = d
-            except Exception: continue
+                rpc_params = {
+                    "query_embedding": query_embedding,
+                    "match_threshold": 0.25,  # 임계값 완화: 교차 언어 및 의미 기반 매칭 확률 증가
+                    "match_count": 30,        # 후보군 확장 후 Reranker에 위임
+                    "filter_agency": target_agency,
+                    "filter_title": target_title
+                }
+                search_res = supabase.rpc("match_document_chunks_with_filters", rpc_params).execute()
+                for d in search_res.data:
+                    all_docs_map[d['id']] = d
+            except Exception as e:
+                print(f"Vector Search Error: {e}")
 
-    # 재정렬 및 컨텍스트 구성
-    unique_chunks = list(all_chunks.values())
-    reranked = rerank_chunks(user_query, unique_chunks, top_n=12)
+    unique_docs = list(all_docs_map.values())
+    reranked_docs = rerank_chunks(user_query, unique_docs, top_n=10)
 
-    for d in reranked:
-        accessed_sources.append({"url": d['url'], "title": d.get('title', 'Unknown Source')})
-        db_context_parts.append(f"### 원문 출처: {d.get('title', '문서')} (URL: {d['url']})\n{d['content']}")
+    if reranked_docs:
+        chunk_texts = []
+        for d in reranked_docs:
+            accessed_sources.append({"url": d['url']})
+            chunk_texts.append(f"-[출처: {d.get('url')}]\n내용: {d.get('content', '')}")
+        db_context_parts.append("[일반 규정 검색 결과]\n" + "\n\n".join(chunk_texts))
 
-    db_context_str = "\n\n".join(db_context_parts) if db_context_parts else "내부 DB에 직접적인 관련 데이터가 부족합니다."
+    db_context_str = "\n\n".join(db_context_parts)
+    if not db_context_str:
+        db_context_str = "내부 DB에서 관련된 정보를 찾지 못했습니다."
 
+    # 2단계: 메인 모델 (DB 데이터 주입 + 구글 웹 검색 연동)
     system_instruction = """
-    당신은 글로벌 인허가 전략을 수립하는 30년 경력의 RA 수석 컨설턴트입니다.
-    제공된 [내부 DB 데이터]를 최우선 근거로 사용하여 사용자의 질문에 대해 심화된 분석 리포트를 작성하십시오.
+    당신은 글로벌 규제기관(FDA, EMA, ICH 등)의 규정과 바이오시밀러 인허가에 정통한 30년 경력의 RA 최고 전문가입니다.
 
-    [작성 가이드라인]
-    1. 전략적 의견: 단순 정보 나열이 아니라, 규제 요건이 실무에 미치는 영향과 대응 전략을 제시하십시오.
-    2. 출처 매핑: 답변 중 DB 내용을 인용한 문장 끝에 반드시 해당 문서명을 명시하십시오. (예: ...해야 합니다. [출처: FDA Biosimilar Guidance])
-    3. 정보 구분: DB 기반 내용은 **[DB 참조]**, 웹 검색 보완 내용은 **[웹 참조]**로 명확히 분리하십시오.
-    4. 톤앤매너: 비유 없이 담백하고 전문적인 경어체를 사용하십시오. 과장이나 아첨은 절대 금지합니다.
+    [상황별 답변 및 데이터 활용 원칙]
+    1. 최우선 참조: 프롬프트에 제공된 [내부 DB 검색 결과]를 최우선으로 분석하여 답변의 객관적 근거로 활용하십시오.
+    2. 사용자 질의 대응: 사용자가 "어떤 문서를 따라야 하는가?" 또는 "DB에서 해당 내용을 다루는 문서는 무엇인가?"라고 묻는 경우, 반드시 제공된 [내부 DB 검색 결과]의 [출처: URL] 및 관련 내용을 기반으로 "DB 내에서 확인된 문서는 OOO입니다"라고 명확히 지칭하여 답변하십시오.
+    3. 지식 보완 (웹 검색): 주입된 DB 정보가 부족하거나 최신 규제 동향, 시장 상황 파악이 필요한 경우, 내장된 구글 검색 도구(`Google Search`)를 호출하여 지식을 보완하십시오.
+
+    [출력 및 서술 원칙]
+    1. 비유적인 설명을 배제하고, 규제 조항과 사실관계에 근거하여 객관적이고 사실적인 설명만을 제공하십시오.
+    2. 사용자에게 아첨하거나 과장된 추임새를 절대 사용하지 마십시오. 담백하게 사실관계와 전략 위주로 서술하십시오.
+    3. 정보 출처 구분: 제공된 DB 데이터 기반 서술은 **[DB 참조]**로, 웹 검색을 통해 보완된 데이터는 **[웹 참조]**로 표기하여 시각적으로 분리하십시오. 인용한 내용의 출처(URL, 문서명)를 답변의 마지막에 목록으로 명시하십시오. 웹 출처는 반드시 출처별로 링크를 붙여서 즉시 확인이 가능하도록 하십시오.
+    4. [웹 참조]의 출처 url 링크는 환각 정보를 제공하지 않도록 엄격히 검증한 후 제공하십시오.
+    5. 한국어 존댓말을 사용하며, 가독성을 위해 마크다운 표와 글머리 기호를 활용하십시오.
     """
+
+    final_prompt = f"[내부 DB 검색 결과]\n{db_context_str}\n\n---\n\n[사용자 질의]\n{user_query}"
 
     try:
         chat = client.chats.create(
             model=REASONING_MODEL,
             config=types.GenerateContentConfig(
                 system_instruction=system_instruction,
-                temperature=0.1,
+                temperature=0.1, 
                 tools=[types.Tool(google_search=types.GoogleSearch())]
             )
         )
-        response = execute_with_retry(lambda: chat.send_message(f"[내부 DB 데이터]\n{db_context_str}\n\n질의: {user_query}"))
-        log_usage(response, "Chatbot")
-        
-        # 중복 소스 제거
-        final_sources = []
-        seen = set()
-        for s in accessed_sources:
-            if s['url'] not in seen:
-                final_sources.append(s)
-                seen.add(s['url'])
 
-        return getattr(response, 'text', "답변을 생성할 수 없습니다."), final_sources
+        def _send_chat():
+            return chat.send_message(final_prompt)
+
+        response = execute_with_retry(_send_chat)
+
+        unique_sources = []
+        seen_urls = set()
+        for source in accessed_sources:
+            if source['url'] not in seen_urls:
+                seen_urls.add(source['url'])
+                unique_sources.append(source)
+
+        return response.text, unique_sources
+
     except Exception as e:
-        return f"분석 중 오류가 발생했습니다: {str(e)}", []
+        return f"답변 생성 중 오류가 발생했습니다: {str(e)}", []
+
 
 def extract_core_content(text: str, query: str, max_length: int) -> str:
-    """다중 문서 비교 시 컨텍스트 초과 방지를 위한 핵심 내용 선별 압축"""
-    prompt = f"질문({query})과 관련된 핵심 규제 요건 및 기준점만 {max_length}자 내외로 추출하십시오: {text}"
+    """단순 절삭을 방지하기 위해 FAST_MODEL을 활용하여 핵심 문맥을 선별적으로 압축합니다."""
+    prompt = f"""
+    다음 문서에서 사용자의 질의와 관련된 핵심 규제 요건, 기준점, 예외 조항 등을 추출하십시오.
+    객관적인 사실 관계 위주로 요약하며, 전체 텍스트 분량은 {max_length}자 내외로 구성하십시오.
+    
+    [사용자 질의]
+    {query}
+    
+    [문서 원문]
+    {text}
+    """
+    def _call_extract():
+        return client.models.generate_content(
+            model=FAST_MODEL,
+            contents=prompt,
+            config=types.GenerateContentConfig(temperature=0.0)
+        )
     try:
-        res = execute_with_retry(lambda: client.models.generate_content(
-            model=FAST_MODEL, contents=prompt, config=types.GenerateContentConfig(temperature=0.0)
-        ))
-        log_usage(res, "Summarization")
-        return getattr(res, 'text', text[:max_length])
-    except:
+        response = execute_with_retry(_call_extract)
+        return response.text
+    except Exception as e:
+        print(f"Extraction failed, falling back to truncation: {e}")
         return text[:max_length]
 
-def compare_multiple_documents(docs_info, user_query: str = "종합 비교 분석 요청"):
-    """여러 가이드라인 문서를 객관적으로 대조 분석"""
+
+def compare_multiple_documents(docs_info, user_query: str = "위 문서들을 종합적이고 심층적으로 비교 분석하십시오."):
+    """다수의 가이드라인 문서를 객관적으로 대조하고 웹 검색을 통해 심층 분석을 보완합니다."""
     try:
         docs_text = ""
         doc_count = len(docs_info)
         chars_per_doc = MAX_TOTAL_CHARS // doc_count if doc_count > 0 else MAX_TOTAL_CHARS
 
         for i, doc in enumerate(docs_info):
-            if not doc.get('url'): continue
             chunk_res = supabase.table("document_chunks").select("content").eq("url", doc['url']).order("chunk_index").execute()
             full_text = " ".join([c['content'] for c in chunk_res.data])
-            
+
+            # 원문이 할당된 글자 수를 초과할 경우, 핵심 내용 압축 함수 호출
             if len(full_text) > chars_per_doc:
                 processed_text = extract_core_content(full_text, user_query, chars_per_doc)
             else:
                 processed_text = full_text
-            
-            docs_text += f"\n\n--- [문서 {i+1}: {doc.get('title', 'Unknown')} ({doc.get('agency', 'N/A')})] ---\n{processed_text}"
+
+            docs_text += f"\n\n--- [문서 {i+1}: {doc.get('title', 'Unknown')} ({doc.get('agency', 'N/A')})] ---\n{processed_text}" 
 
         system_instruction = """
-        당신은 RA 최고 전문가입니다. 제공된 여러 문서들을 객관적으로 대조하여 차이점과 공통점을 분석하십시오.
-        마크다운 표를 활용하여 가시성을 높이고, 실무적 관점에서의 시사점을 **[DB 참조]**와 **[웹 참조]**를 구분하여 기술하십시오.
-        """
+        당신은 바이오시밀러 및 제약 인허가에 정통한 30년 경력의 RA 최고 전문가입니다.
+
+        [다중 문서 비교 분석 원칙]
+        1. 객관성 및 사실 기반: 제공된 문서에 근거하여 용어 정의, 요구 수준, 기준점 차이를 객관적으로 대조하십시오.
+        2. 지식 보완 및 문맥 확장: 
+           - 제공된 [분석 대상 문서들]을 통한 대조 결과는 **[DB 참조]**로 명시하고 원문의 내용을 표시하십시오.
+           - 규제가 다르게 제정된 정책적 배경, 최신 업데이트 사항, 실무 전략에 미치는 영향을 분석할 때 내장된 구글 검색 도구(`Google Search`)를 활용하여 내용을 보완하고, 이를 **[웹 참조]**로 명확히 분리 서술하십시오.
         
-        response = execute_with_retry(lambda: client.models.generate_content(
-            model=REASONING_MODEL,
-            contents=f"요청: {user_query}\n\n[대상 문서군]\n{docs_text}",
-            config=types.GenerateContentConfig(
-                system_instruction=system_instruction,
-                temperature=0.0,
-                tools=[types.Tool(google_search=types.GoogleSearch())]
+        [출력 및 서술 원칙]
+        1. 비유적인 설명을 배제하고, 규제 조항과 사실관계에 근거하여 객관적이고 사실적인 설명만을 제공하십시오.
+        2. 사용자에게 아첨하거나 과장된 추임새를 절대 사용하지 마십시오. 담백하게 사실관계 위주로 서술하십시오.
+        3. 인용: 특정 내용을 서술할 때 문서명 등 식별 정보를 반드시 포함하십시오. 웹 검색 내용도 출처 url을 포함하여 문서의 마지막에 배치하십시오. 웹 출처는 반드시 출처별로 링크를 붙여서 즉시 확인이 가능하도록 하십시오.
+        4. [웹 참조]의 출처 url 링크는 환각 정보를 제공하지 않도록 엄격히 검증한 후 제공하십시오.
+        5. 한국어 존댓말을 사용하며, 가독성을 위해 마크다운 비교 요약표를 우선적으로 배치하십시오.
+        """
+
+        prompt = f"질문/요청: {user_query}\n\n[분석 대상 문서들]\n{docs_text}"
+
+        def _generate_comparison():
+            return client.models.generate_content(
+                model=REASONING_MODEL,
+                contents=prompt,
+                config=types.GenerateContentConfig(
+                    system_instruction=system_instruction,
+                    temperature=0.0, 
+                    tools=[types.Tool(google_search=types.GoogleSearch())]
+                )
             )
-        ))
-        log_usage(response, "Multi_Compare")
-        return getattr(response, 'text', "비교 분석 결과를 생성할 수 없습니다.")
+
+        response = execute_with_retry(_generate_comparison)
+        return response.text
+
     except Exception as e:
-        return f"분석 오류: {str(e)}"
+        return f"문서 비교 분석 중 오류가 발생했습니다: {str(e)}"
