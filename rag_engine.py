@@ -30,10 +30,26 @@ EMBEDDING_MODEL = "gemini-embedding-001"
 MAX_TOTAL_CHARS = 35000 
 
 def execute_with_retry(api_call_func, max_retries=3):
-    """API 호출 중 500, 503 또는 429 에러 발생 시 지수 백오프로 재시도하는 래퍼 함수입니다."""
+    """API 호출 중 에러 발생 시 지수 백오프로 재시도하고, 성공 시 토큰 사용량을 DB에 자동 기록합니다."""
     for attempt in range(max_retries):
         try:
-            return api_call_func()
+            response = api_call_func()
+            
+            # API 응답에서 토큰 사용량을 추출하여 DB에 누적
+            if hasattr(response, 'usage_metadata') and response.usage_metadata:
+                try:
+                    in_tokens = response.usage_metadata.prompt_token_count
+                    out_tokens = response.usage_metadata.candidates_token_count
+                    if in_tokens or out_tokens:
+                        supabase.table("token_usage").insert({
+                            "input_tokens": in_tokens,
+                            "output_tokens": out_tokens
+                        }).execute()
+                except Exception:
+                    pass
+            
+            return response
+            
         except Exception as e:
             error_msg = str(e)
             if "503" in error_msg or "429" in error_msg or "UNAVAILABLE" in error_msg or "500" in error_msg or "INTERNAL" in error_msg:
