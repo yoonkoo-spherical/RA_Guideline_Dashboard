@@ -132,7 +132,6 @@ def delete_document_from_db(doc_url, doc_title):
         st.error(f"데이터베이스 삭제 중 오류 발생: {e}")
         return False
 
-# URL 도메인 분석을 통해 기관명 자동 분류
 def infer_agency_from_url(url):
     url_lower = url.lower()
     if "fda.gov" in url_lower: return "FDA"
@@ -143,11 +142,8 @@ def infer_agency_from_url(url):
     elif "mfds.go.kr" in url_lower: return "MFDS"
     else: return "기타"
 
-# AI 답변에서 웹 출처를 찾아 대기열에 등록하는 함수
 def queue_web_discovered_urls(response_text):
-    # 1. 마크다운 형식 링크 추출: [Title](URL)
     markdown_links = re.findall(r'\[([^\]]+)\]\((https?://[^\)]+)\)', response_text)
-    # 2. 일반 텍스트 형식 URL 추출
     raw_urls = re.findall(r'(?<!\()(https?://[^\s\)\]]+)', response_text)
     
     discovered = []
@@ -165,17 +161,14 @@ def queue_web_discovered_urls(response_text):
         agency_inferred = infer_agency_from_url(url)
         
         try:
-            # 기존 가이드라인 DB에 존재하는지 확인
             existing = supabase.table("guidelines").select("url").eq("url", url).execute()
             if existing.data:
                 continue
                 
-            # 사용자가 수동 삭제한 블랙리스트에 존재하는지 확인
             deleted = supabase.table("deleted_docs").select("url").eq("url", url).execute()
             if deleted.data:
                 continue
                 
-            # 대기열에 삽입
             supabase.table("pending_urls").insert({
                 "url": url, 
                 "title": title, 
@@ -353,7 +346,38 @@ def main():
                             st.error("분석 서버와의 통신에 실패했습니다.")
 
     with tab_chat:
-        st.markdown("#### 규제 가이드라인 AI 어시스턴트 (Guideline Chatbot)")
+        st.markdown("#### 💬 규제 가이드라인 AI 어시스턴트 (Guideline Chatbot)")
+
+        st.markdown("##### 📌 필수 참조 문서 선택 (선택 사항)")
+        chat_embedded_only_df = filtered_df[filtered_df['status_score'] == 4].copy()
+
+        chat_search_query = st.text_input("참조할 문서 검색 (쉼표(,)로 구분하여 다중 검색 가능)", "", key="chat_multi_search")
+        if chat_search_query:
+            keywords = [kw.strip() for kw in chat_search_query.split(",") if kw.strip()]
+            if keywords:
+                pattern = '|'.join(map(re.escape, keywords))
+                chat_embedded_only_df = chat_embedded_only_df[chat_embedded_only_df['title'].str.contains(pattern, case=False, na=False)]
+
+        forced_docs_info = []
+        if chat_embedded_only_df.empty:
+            st.info("선택 가능한 문서가 없습니다.")
+        else:
+            chat_embedded_only_df['상태'] = "🟢 준비 완료"
+            chat_df_for_selection = chat_embedded_only_df[['agency', 'category', 'title', '상태', 'url']].copy()
+            chat_df_for_selection['agency'] = chat_df_for_selection['agency'].apply(lambda x: f"{get_agency_flag(x)} {x}")
+            chat_df_for_selection.insert(0, "참조 선택", False)
+            
+            edited_chat_df = st.data_editor(
+                chat_df_for_selection, hide_index=True,
+                column_config={"참조 선택": st.column_config.CheckboxColumn("참조 선택", default=False), "url": None},
+                disabled=["agency", "category", "title", "상태"], use_container_width=True,
+                key="chat_data_editor"
+            )
+            
+            selected_chat_rows = edited_chat_df[edited_chat_df["참조 선택"]]
+            forced_docs_info = selected_chat_rows.to_dict('records')
+            
+        st.divider()
 
         if "messages" not in st.session_state: st.session_state.messages = []
         if "chat_input_val" not in st.session_state: st.session_state.chat_input_val = ""
@@ -376,7 +400,7 @@ def main():
 
             with st.spinner("답변 생성 중... (외부 규정 참조 시 대기열에 자동 등록됩니다)"):
                 try:
-                    response_text, sources = rag_engine.ask_guideline(prompt)
+                    response_text, sources = rag_engine.ask_guideline(prompt, forced_docs_info)
                     if "오류가 발생" in response_text:
                         st.error("AI가 답변을 생성하지 못했습니다.")
                         st.session_state.messages.append({"role": "assistant", "content": "오류가 발생했습니다.", "sources": []})
@@ -384,7 +408,6 @@ def main():
                         st.session_state.messages.append({"role": "assistant", "content": response_text, "sources": sources})
                         save_chat_to_db("assistant", response_text)
                         
-                        # 큐에 웹 발견 URL 등록 실행
                         queue_web_discovered_urls(response_text)
                         
                 except Exception:
@@ -400,9 +423,9 @@ def main():
                 with st.chat_message(msg["role"]):
                     st.markdown(msg["content"])
                     if msg["role"] == "assistant" and msg.get("sources"):
-                        with st.expander("🔍 AI가 참고한 내부 DB 문서 확인"):
+                        with st.expander("🔍 AI가 참고한 관련 내부 DB 문서 확인"):
                             for idx, source in enumerate(msg["sources"]):
-                                st.markdown(f"**[{idx+1}] 출처:** [{source['title']}]({source['url']})")
+                                st.markdown(f"**[{idx+1}] 출처:** [{source.get('title', '원문 링크')}]({source['url']})")
 
     with tab_history:
         st.markdown("#### 🗂️ Chatbot 및 분석 전체 이력")
