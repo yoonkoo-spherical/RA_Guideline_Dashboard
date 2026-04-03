@@ -49,6 +49,8 @@ def calculate_progress(df, embedded_urls):
     embed_pct = int((embedded_docs / total_docs) * 100) if total_docs > 0 else 0
     return total_docs, summarized_docs, summary_pct, embedded_docs, embed_pct
 
+# 토큰 현황 1시간 간격 자동 갱신
+@st.cache_data(ttl=3600)
 def get_token_stats():
     try:
         res = supabase.table("token_usage").select("*").execute()
@@ -186,7 +188,7 @@ def main():
         .stMarkdown th, .stMarkdown td { border: 1px solid #ddd !important; padding: 12px !important; text-align: left !important; word-wrap: break-word !important; white-space: normal !important; }
         .stMarkdown th { background-color: #f4f6f8 !important; font-weight: 600 !important; color: #333 !important; }
         .stMarkdown li { margin-bottom: 8px; line-height: 1.6; }
-        .stTextInput div[data-baseweb="input"] { border: 1px solid #1f1f1f !important; border-radius: 4px !important; }
+        .stTextArea textarea { border: 1px solid #1f1f1f !important; border-radius: 4px !important; }
     </style>
     """, unsafe_allow_html=True)
 
@@ -219,7 +221,16 @@ def main():
 
     now = datetime.now()
     st.sidebar.header(f"💰 {now.year}년 {now.month}월 API 토큰 현황")
-    token_display_placeholder = st.sidebar.empty()
+    
+    # 토큰 현황 데이터 및 수동 새로고침 UI
+    if st.sidebar.button("🔄 토큰 현황 수동 새로고침", use_container_width=True):
+        get_token_stats.clear()
+        
+    in_tokens, out_tokens, est_cost = get_token_stats()
+    st.sidebar.write(f"- 누적 입력 토큰: **{in_tokens:,}**")
+    st.sidebar.write(f"- 누적 출력 토큰: **{out_tokens:,}**")
+    st.sidebar.write(f"- 예상 과금액: **${est_cost:.2f}**")
+    st.sidebar.caption("※ 1시간 간격으로 자동 갱신됩니다.")
 
     tab_search, tab_old_new, tab_multi, tab_chat, tab_history, tab_upload = st.tabs([
         "📄 문서 검색", "🔄 신/구버전 비교", "⚖️ 다중 문서 비교", "💬 Guideline Chatbot", "🗂️ 사용 이력", "📤 PDF 수동 업로드"
@@ -317,7 +328,7 @@ def main():
             st.info("임베딩 및 요약이 정상적으로 완료된 문서가 없거나 검색 조건에 맞는 문서가 없습니다.")
         else:
             embedded_only_df['상태'] = "🟢 준비 완료"
-            df_for_selection = embedded_only_df[[ 'agency','title', 'category', '상태', 'url']].copy()
+            df_for_selection = embedded_only_df[['agency', 'title', 'category', '상태', 'url']].copy()
             df_for_selection['agency'] = df_for_selection['agency'].apply(lambda x: f"{get_agency_flag(x)} {x}")
             df_for_selection.insert(0, "비교 선택", False)
             edited_df = st.data_editor(
@@ -363,7 +374,7 @@ def main():
             st.info("선택 가능한 문서가 없습니다.")
         else:
             chat_embedded_only_df['상태'] = "🟢 준비 완료"
-            chat_df_for_selection = chat_embedded_only_df[['agency',  'title', 'category', '상태', 'url']].copy()
+            chat_df_for_selection = chat_embedded_only_df[['agency', 'title', 'category', '상태', 'url']].copy()
             chat_df_for_selection['agency'] = chat_df_for_selection['agency'].apply(lambda x: f"{get_agency_flag(x)} {x}")
             chat_df_for_selection.insert(0, "참조 선택", False)
             
@@ -380,17 +391,18 @@ def main():
         st.divider()
 
         if "messages" not in st.session_state: st.session_state.messages = []
-        if "chat_input_val" not in st.session_state: st.session_state.chat_input_val = ""
         if "current_prompt" not in st.session_state: st.session_state.current_prompt = None
 
-        def submit_chat():
-            if st.session_state.chat_input_val.strip():
-                st.session_state.current_prompt = st.session_state.chat_input_val
-                st.session_state.chat_input_val = ""
-
-        st.text_input("질문을 입력하세요 (Enter로 전송):", key="chat_input_val", on_change=submit_chat)
+        # 입력창 위쪽 배치 및 다중행(Text Area) 대응 폼 설정
+        with st.form("chat_input_form", clear_on_submit=True):
+            user_input = st.text_area("질문을 입력하세요 (줄바꿈: Enter, 전송: Ctrl+Enter 또는 '전송' 버튼 클릭)", height=100)
+            submitted = st.form_submit_button("전송", type="primary")
+            if submitted and user_input.strip():
+                st.session_state.current_prompt = user_input
+                
         st.divider()
 
+        # 프롬프트 제출 시 로직
         if st.session_state.current_prompt:
             prompt = st.session_state.current_prompt
             st.session_state.current_prompt = None
@@ -413,7 +425,10 @@ def main():
                 except Exception:
                     st.error("예기치 않은 시스템 오류가 발생했습니다.")
                     st.session_state.messages.append({"role": "assistant", "content": "시스템 오류가 발생했습니다.", "sources": []})
+            
+            st.rerun() # 답변 렌더링 후 UI 즉시 새로고침
 
+        # 최신 질문과 답변이 상단에 뜨도록 메시지 리스트 역순 정렬 렌더링
         pairs = []
         for i in range(0, len(st.session_state.messages), 2):
             pairs.append(st.session_state.messages[i:i+2])
@@ -464,12 +479,27 @@ def main():
 
                 st.divider()
                 st.write("▼ 채팅 내역 확인")
+                
+                # 질의응답 세트 단위로 묶어서 역순으로 출력 (가장 최신 대화가 위에 오도록)
+                grouped_chats = []
+                temp_pair = []
+                for chat in chat_data:
+                    if chat['role'] == 'user':
+                        if temp_pair: grouped_chats.append(temp_pair)
+                        temp_pair = [chat]
+                    else:
+                        temp_pair.append(chat)
+                        grouped_chats.append(temp_pair)
+                        temp_pair = []
+                if temp_pair: grouped_chats.append(temp_pair)
+
                 with st.container(height=600):
-                    for chat in chat_data:
-                        role_kr = "👤 사용자" if chat['role'] == 'user' else "🤖 AI"
-                        chat_time_kst = convert_to_kst(chat.get('created_at'))
-                        st.markdown(f"**{role_kr}** ({chat_time_kst})")
-                        st.write(chat['content'])
+                    for pair in reversed(grouped_chats):
+                        for chat in pair:
+                            role_kr = "👤 사용자" if chat['role'] == 'user' else "🤖 AI"
+                            chat_time_kst = convert_to_kst(chat.get('created_at'))
+                            st.markdown(f"**{role_kr}** ({chat_time_kst})")
+                            st.write(chat['content'])
                         st.divider()
             else:
                 st.info("최근 7일간 저장된 채팅 기록이 없습니다.")
@@ -528,13 +558,6 @@ def main():
                         st.error(f"업로드 에러: {e}")
             else:
                 st.warning("PDF 파일을 첨부하고 카테고리를 입력해 주십시오.")
-
-    in_tokens, out_tokens, est_cost = get_token_stats()
-    with token_display_placeholder.container():
-        st.write(f"- 누적 입력 토큰: **{in_tokens:,}**")
-        st.write(f"- 누적 출력 토큰: **{out_tokens:,}**")
-        st.write(f"- 예상 과금액: **${est_cost:.2f}**")
-        st.caption("※ 현재 API 모델(Flash) 유지 중. 향후 유료 요금제(Pro) 전환 시 실 과금액 추정치입니다.")
 
 if __name__ == "__main__":
     main()
