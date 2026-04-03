@@ -465,19 +465,6 @@ def main():
                     date_str = chat_time_kst.split(" ")[0]
                     daily_chats[date_str].append((chat, chat_time_kst))
 
-                for date_str in sorted(daily_chats.keys(), reverse=True):
-                    chats_for_day = daily_chats[date_str]
-                    md_chat = f"# {date_str} Guideline Chatbot 기록\n\n"
-                    for chat, chat_time_kst in chats_for_day:
-                        role_kr = "사용자" if chat['role'] == 'user' else "AI"
-                        md_chat += f"### {role_kr}\n<div class='date-stamp'>작성일시: {chat_time_kst}</div>\n\n{chat['content']}\n\n---\n\n"
-                    try:
-                        html_chat_content = markdown.markdown(md_chat, extensions=['tables'])
-                        final_html_chat = f"<!DOCTYPE html><html><head><meta charset='utf-8'>{css_style}</head><body>{html_chat_content}</body></html>"
-                        st.download_button(label=f"💾 {date_str} 채팅 기록 다운로드 (.html)", data=final_html_chat, file_name=f"guideline_chat_{date_str}.html", mime="text/html", key=f"dl_chat_{date_str}")
-                    except Exception: pass
-
-                st.divider()
                 st.write("▼ 채팅 내역 확인")
                 
                 # 질의응답 세트 단위로 묶어서 역순으로 출력 (가장 최신 대화가 위에 오도록)
@@ -501,6 +488,22 @@ def main():
                             st.markdown(f"**{role_kr}** ({chat_time_kst})")
                             st.write(chat['content'])
                         st.divider()
+
+                st.divider()
+                st.write("▼ 일자별 채팅 기록 다운로드")
+
+                for date_str in sorted(daily_chats.keys(), reverse=True):
+                    chats_for_day = daily_chats[date_str]
+                    md_chat = f"# {date_str} Guideline Chatbot 기록\n\n"
+                    for chat, chat_time_kst in chats_for_day:
+                        role_kr = "사용자" if chat['role'] == 'user' else "AI"
+                        md_chat += f"### {role_kr}\n<div class='date-stamp'>작성일시: {chat_time_kst}</div>\n\n{chat['content']}\n\n---\n\n"
+                    try:
+                        html_chat_content = markdown.markdown(md_chat, extensions=['tables'])
+                        final_html_chat = f"<!DOCTYPE html><html><head><meta charset='utf-8'>{css_style}</head><body>{html_chat_content}</body></html>"
+                        st.download_button(label=f"💾 {date_str} 채팅 기록 다운로드 (.html)", data=final_html_chat, file_name=f"guideline_chat_{date_str}.html", mime="text/html", key=f"dl_chat_{date_str}")
+                    except Exception: pass
+
             else:
                 st.info("최근 7일간 저장된 채팅 기록이 없습니다.")
 
