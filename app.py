@@ -317,7 +317,7 @@ def main():
             st.info("임베딩 및 요약이 정상적으로 완료된 문서가 없거나 검색 조건에 맞는 문서가 없습니다.")
         else:
             embedded_only_df['상태'] = "🟢 준비 완료"
-            df_for_selection = embedded_only_df[[ 'agency', 'category','title', '상태', 'url']].copy()
+            df_for_selection = embedded_only_df[[ 'agency','title', 'category', '상태', 'url']].copy()
             df_for_selection['agency'] = df_for_selection['agency'].apply(lambda x: f"{get_agency_flag(x)} {x}")
             df_for_selection.insert(0, "비교 선택", False)
             edited_df = st.data_editor(
@@ -363,7 +363,7 @@ def main():
             st.info("선택 가능한 문서가 없습니다.")
         else:
             chat_embedded_only_df['상태'] = "🟢 준비 완료"
-            chat_df_for_selection = chat_embedded_only_df[['agency', 'category', 'title', '상태', 'url']].copy()
+            chat_df_for_selection = chat_embedded_only_df[['agency',  'title', 'category', '상태', 'url']].copy()
             chat_df_for_selection['agency'] = chat_df_for_selection['agency'].apply(lambda x: f"{get_agency_flag(x)} {x}")
             chat_df_for_selection.insert(0, "참조 선택", False)
             
