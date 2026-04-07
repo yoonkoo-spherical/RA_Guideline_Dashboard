@@ -185,7 +185,7 @@ def filter_links_with_llm(links):
     valid_links = []
     for link in links:
         prompt = f"""
-        이 문서가 바이오시밀러 또는 mAb의 개발, 인허가,CMC, 제출 요건(Submission Requirements), 또는 공식 초안(Draft) 가이드라인입니까?
+        이 문서가 바이오시밀러 또는 mAb의 개발, 인허가, CMC, 제출 요건(Submission Requirements), post-authorisation, post-authorization, 변경허가(variation, SNDS, PAS, CBE 등) 또는 공식 초안(Draft) 가이드라인입니까?
         규제 기관의 공식 정보라면 true, 뉴스나 단순 홍보물이라면 false를 반환하세요.
         제목: {link['title']}
         요약: {link['snippet']}
