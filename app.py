@@ -9,6 +9,7 @@ from datetime import datetime, timedelta
 from collections import defaultdict
 import re
 import requests
+import manual_processor  # 추가된 모듈
 
 @st.cache_resource
 def init_connection():
@@ -49,7 +50,6 @@ def calculate_progress(df, embedded_urls):
     embed_pct = int((embedded_docs / total_docs) * 100) if total_docs > 0 else 0
     return total_docs, summarized_docs, summary_pct, embedded_docs, embed_pct
 
-# 토큰 현황 1시간 간격 자동 갱신
 @st.cache_data(ttl=3600)
 def get_token_stats():
     try:
@@ -222,7 +222,6 @@ def main():
     now = datetime.now()
     st.sidebar.header(f"💰 {now.year}년 {now.month}월 API 토큰 현황")
     
-    # 토큰 현황 데이터 및 수동 새로고침 UI
     if st.sidebar.button("🔄 토큰 현황 수동 새로고침", use_container_width=True):
         get_token_stats.clear()
         
@@ -393,7 +392,6 @@ def main():
         if "messages" not in st.session_state: st.session_state.messages = []
         if "current_prompt" not in st.session_state: st.session_state.current_prompt = None
 
-        # 입력창 위쪽 배치 및 다중행(Text Area) 대응 폼 설정
         with st.form("chat_input_form", clear_on_submit=True):
             user_input = st.text_area("질문을 입력하세요 (줄바꿈: Enter, 전송: Ctrl+Enter 또는 '전송' 버튼 클릭)", height=100)
             submitted = st.form_submit_button("전송", type="primary")
@@ -402,7 +400,6 @@ def main():
                 
         st.divider()
 
-        # 프롬프트 제출 시 로직
         if st.session_state.current_prompt:
             prompt = st.session_state.current_prompt
             st.session_state.current_prompt = None
@@ -419,16 +416,13 @@ def main():
                     else:
                         st.session_state.messages.append({"role": "assistant", "content": response_text, "sources": sources})
                         save_chat_to_db("assistant", response_text)
-                        
                         queue_web_discovered_urls(response_text)
-                        
                 except Exception:
                     st.error("예기치 않은 시스템 오류가 발생했습니다.")
                     st.session_state.messages.append({"role": "assistant", "content": "시스템 오류가 발생했습니다.", "sources": []})
             
-            st.rerun() # 답변 렌더링 후 UI 즉시 새로고침
+            st.rerun()
 
-        # 최신 질문과 답변이 상단에 뜨도록 메시지 리스트 역순 정렬 렌더링
         pairs = []
         for i in range(0, len(st.session_state.messages), 2):
             pairs.append(st.session_state.messages[i:i+2])
@@ -467,7 +461,6 @@ def main():
 
                 st.write("▼ 채팅 내역 확인")
                 
-                # 질의응답 세트 단위로 묶어서 역순으로 출력 (가장 최신 대화가 위에 오도록)
                 grouped_chats = []
                 temp_pair = []
                 for chat in chat_data:
@@ -503,7 +496,6 @@ def main():
                         final_html_chat = f"<!DOCTYPE html><html><head><meta charset='utf-8'>{css_style}</head><body>{html_chat_content}</body></html>"
                         st.download_button(label=f"💾 {date_str} 채팅 기록 다운로드 (.html)", data=final_html_chat, file_name=f"guideline_chat_{date_str}.html", mime="text/html", key=f"dl_chat_{date_str}")
                     except Exception: pass
-
             else:
                 st.info("최근 7일간 저장된 채팅 기록이 없습니다.")
 
@@ -540,25 +532,31 @@ def main():
                 st.info("저장된 비교 분석 기록이 없습니다.")
 
     with tab_upload:
-        st.markdown("#### 📤 로컬 PDF 가이드라인 업로드")
+        st.markdown("#### 📤 로컬 PDF 가이드라인 업로드 및 즉시 분석")
         col1, col2 = st.columns(2)
         with col1: agency_input = st.selectbox("발행 기관 (Agency)", ["FDA", "EMA", "MHRA", "Health Canada", "ICH", "MFDS", "기타"])
         with col2: category_input = st.text_input("카테고리/키워드 (예: CMC, 임상, 비임상)")
 
         uploaded_file = st.file_uploader("PDF 파일 선택", type="pdf")
 
-        if st.button("데이터베이스 추가", type="primary"):
+        if st.button("즉시 데이터베이스 추가 및 분석 실행", type="primary"):
             if uploaded_file is not None and category_input:
-                with st.spinner("파일 업로드 중입니다..."):
+                with st.spinner("파일 업로드 및 AI 통합 분석 중... (수 분이 소요될 수 있습니다)"):
                     file_name = uploaded_file.name
                     file_bytes = uploaded_file.read()
-                    try:
-                        supabase.storage.from_("guidelines_pdf").upload(file_name, file_bytes)
-                        file_url = supabase.storage.from_("guidelines_pdf").get_public_url(file_name)
-                        supabase.table("guidelines").insert({"title": file_name, "agency": agency_input, "category": category_input, "url": file_url}).execute()
-                        st.success("데이터베이스 추가 완료! 스케줄러에 의해 자동으로 분석 파이프라인이 실행됩니다.")
-                    except Exception as e:
-                        st.error(f"업로드 에러: {e}")
+                    
+                    # manual_processor를 사용하여 즉시 처리 호출
+                    success, message = manual_processor.process_file_immediately(
+                        file_bytes, file_name, agency_input, category_input
+                    )
+                    
+                    if success:
+                        st.success(f"완료: {message}")
+                        load_data.clear()
+                        time.sleep(1)
+                        st.rerun()
+                    else:
+                        st.error(f"처리 실패: {message}")
             else:
                 st.warning("PDF 파일을 첨부하고 카테고리를 입력해 주십시오.")
 
