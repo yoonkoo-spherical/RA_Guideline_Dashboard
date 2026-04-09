@@ -235,7 +235,10 @@ def ask_guideline(user_query: str, forced_docs: list = None):
         db_context_parts.append("[일반 규정 검색 결과]\n" + "\n\n".join(chunk_texts))
 
     db_context_str = "\n\n".join(db_context_parts)
-    if not db_context_str:
+    
+    if len(db_context_str) > 30000:
+        db_context_str = db_context_str[:30000] + "\n...(컨텍스트 토큰 한도 제한으로 중략됨)"
+    if not db_context_str.strip():
         db_context_str = "내부 DB에서 관련된 정보를 찾지 못했습니다."
 
     # 2단계: 메인 모델 (DB 데이터 주입 + 구글 웹 검색 연동)
