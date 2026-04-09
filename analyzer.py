@@ -114,6 +114,11 @@ def process_unsummarized_docs():
         analysis_result = analyze_document(text)
         summary = analysis_result.get("summary", "N/A")
         ref_num = analysis_result.get("ref_number", "N/A")
+
+        if "요약 실패" in summary:
+            print(" -> LLM 요약 실패로 인해 DB 업데이트를 생략합니다. (다음 실행 시 재시도)")
+            continue
+            
         print(f" -> AI 요약 및 식별자({ref_num}) 추출 완료")
         
         if ref_num != "N/A" and doc.get('ref_number') != ref_num:
