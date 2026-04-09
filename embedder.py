@@ -21,10 +21,18 @@ def clean_and_chunk_text(text, chunk_size=1000, overlap=100):
     text = re.sub(r'\s+', ' ', text).strip()
     
     chunks = []
-    for i in range(0, len(text), chunk_size - overlap):
-        chunk = text[i:i + chunk_size]
+    start = 0
+    while start < len(text):
+        end = start + chunk_size
+        if end < len(text):
+            space_idx = text.rfind(' ', start, end)
+            if space_idx != -1 and space_idx > start + chunk_size // 2:
+                end = space_idx
+        
+        chunk = text[start:end]
         if len(chunk) > 100:
-            chunks.append(chunk)
+            chunks.append(chunk.strip())
+        start = end - overlap
     return chunks
 
 def process_embeddings():
