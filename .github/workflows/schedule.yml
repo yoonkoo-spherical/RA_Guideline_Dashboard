@@ -55,6 +55,7 @@ jobs:
         uses: actions/checkout@v4
 
       - name: 시스템 의존성 패키지 설치 (OCR 및 PDF 처리용)
+        if: ${{ github.event.inputs.skip_scraping != 'true' }}
         run: |
           sudo apt-get update
           sudo apt-get install -y tesseract-ocr tesseract-ocr-eng tesseract-ocr-kor poppler-utils
