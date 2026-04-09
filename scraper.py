@@ -6,6 +6,7 @@ import tempfile
 import random
 import urllib3
 from urllib.parse import urljoin, urlparse
+import concurrent.futures
 
 import requests
 import fitz  # PyMuPDF
@@ -180,10 +181,7 @@ def search_alternative_pdf_via_serper(title, original_domain):
         print(f"   [!] 대체 검색 중 예외 발생: {e}")
     return None
 
-def filter_links_with_llm(links):
-    if not links: return []
-    valid_links = []
-    for link in links:
+def filter_single_link(link):
         prompt = f"""
         이 문서가 바이오시밀러 또는 mAb의 개발, 인허가, CMC, 제출 요건(Submission Requirements), post-authorisation, post-authorization, 변경허가(variation, SNDS, PAS, CBE 등) 또는 공식 초안(Draft) 가이드라인입니까?
         규제 기관의 공식 정보라면 true, 뉴스나 단순 홍보물이라면 false를 반환하세요.
@@ -197,11 +195,21 @@ def filter_links_with_llm(links):
                 contents=prompt,
                 config=types.GenerateContentConfig(temperature=0.0, response_mime_type="application/json")
             )
-            if json.loads(response.text).get("is_relevant"):
-                valid_links.append(link)
+            return link if json.loads(response.text).get("is_relevant") else None
         except Exception:
-            continue
-        time.sleep(0.5)
+            return None
+
+def filter_links_with_llm(links):
+    if not links: return []
+    valid_links = []
+    
+    # API Rate Limit를 고려하여 적절한 수의 워커(max_workers)로 병렬 처리
+    with concurrent.futures.ThreadPoolExecutor(max_workers=5) as executor:
+        results = executor.map(filter_single_link, links)
+        for res in results:
+            if res:
+                valid_links.append(res)
+                
     return valid_links
 
 def get_deleted_urls():
@@ -228,22 +236,24 @@ def process_and_save_pdf(pdf_url, doc_info, deleted_urls):
             return False 
 
         print(f"   -> 다운로드 성공: {pdf_url}")
+        temp_path = None
         with tempfile.NamedTemporaryFile(delete=False, suffix=".pdf") as temp_pdf:
             temp_pdf.write(res.content)
             temp_path = temp_pdf.name
 
-        raw_text = extract_text_with_ocr(temp_path)
-        supabase.table("guidelines").insert({
-            "title": doc_info['title'],
-            "agency": doc_info['agency'],
-            "category": "Biosimilar/mAb",
-            "url": pdf_url,
-            "raw_text": raw_text
-        }).execute()
-
-        print(f"   -> DB 저장 완료")
-        if os.path.exists(temp_path):
-            os.remove(temp_path)
+        try:
+            raw_text = extract_text_with_ocr(temp_path)
+            supabase.table("guidelines").insert({
+                "title": doc_info['title'],
+                "agency": doc_info['agency'],
+                "category": "Biosimilar/mAb",
+                "url": pdf_url,
+                "raw_text": raw_text
+            }).execute()
+            print(f"   -> DB 저장 완료")
+        finally:
+            if temp_path and os.path.exists(temp_path):
+                os.remove(temp_path)
         return True
     except Exception as e:
         print(f"   -> 처리 오류: {e}")
