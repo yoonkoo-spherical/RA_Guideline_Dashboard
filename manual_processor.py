@@ -21,14 +21,17 @@ client = genai.Client(api_key=GEMINI_API_KEY)
 def process_file_immediately(file_bytes, file_name, agency, category):
     """업로드된 파일을 즉시 분석하고 벡터화하여 DB에 저장합니다."""
     try:
+        tmp_path = None
         # 1. 임시 파일 저장 및 텍스트 추출
         with tempfile.NamedTemporaryFile(delete=False, suffix=".pdf") as tmp:
             tmp.write(file_bytes)
             tmp_path = tmp.name
         
-        raw_text = scraper.extract_text_with_ocr(tmp_path)
-        if os.path.exists(tmp_path):
-            os.remove(tmp_path)
+        try:
+            raw_text = scraper.extract_text_with_ocr(tmp_path)
+        finally:
+            if tmp_path and os.path.exists(tmp_path):
+                os.remove(tmp_path)
 
         if not raw_text or "추출 불가" in raw_text:
             return False, "텍스트를 추출할 수 없습니다."
