@@ -9,6 +9,7 @@ from datetime import datetime, timedelta
 from collections import defaultdict
 import re
 import requests
+from urllib.parse import unquote
 import manual_processor  # 추가된 모듈
 
 @st.cache_resource
@@ -45,7 +46,7 @@ def calculate_progress(df, embedded_urls):
     if df.empty: return 0, 0, 0, 0, 0
     total_docs = len(df)
     summarized_docs = len(df[df['ai_summary'].notna() & (df['ai_summary'] != '') & (~df['ai_summary'].str.contains('텍스트 추출 불가', na=False))])
-    embedded_docs = len([url for url in df['url'] if url in embedded_urls])
+    embedded_docs = len(set(df['url']).intersection(embedded_urls))
     summary_pct = int((summarized_docs / total_docs) * 100) if total_docs > 0 else 0
     embed_pct = int((embedded_docs / total_docs) * 100) if total_docs > 0 else 0
     return total_docs, summarized_docs, summary_pct, embedded_docs, embed_pct
@@ -144,6 +145,29 @@ def infer_agency_from_url(url):
     elif "mfds.go.kr" in url_lower: return "MFDS"
     else: return "기타"
 
+def enhance_document_title(row):
+    """문서 식별자 또는 파일명을 활용하여 중복되는 제목을 구체화합니다."""
+    base_title = str(row.get('title', '제목 없음')).strip()
+    ref = str(row.get('ref_number', 'N/A')).strip()
+    
+    # 1. 문서 식별자(ref_number)가 유효한 경우 제목 앞에 [식별자] 형태로 붙임
+    if ref and ref.lower() not in ['n/a', 'none', 'nan', '']:
+        if ref not in base_title:
+            return f"[{ref}] {base_title}"
+        return base_title
+        
+    # 2. 식별자가 없는 경우, URL의 파일명(.pdf)을 디코딩하여 제목 뒤에 꼬리표로 붙임
+    url = str(row.get('url', '')).strip()
+    if url:
+        filename = unquote(url.split('/')[-1].split('?')[0])
+        if filename.lower().endswith('.pdf'):
+            if len(filename) > 35:
+                filename = filename[:32] + "..."
+            if filename not in base_title:
+                return f"{base_title} ({filename})"
+                
+    return base_title
+
 def queue_web_discovered_urls(response_text):
     markdown_links = re.findall(r'\[([^\]]+)\]\((https?://[^\)]+)\)', response_text)
     raw_urls = re.findall(r'(?<!\()(https?://[^\s\)\]]+)', response_text)
@@ -203,6 +227,9 @@ def main():
     if df.empty:
         st.warning("데이터베이스에 수집된 가이드라인 데이터가 없습니다.")
         return
+        
+    # --- 문서 제목 중복 구분을 위해 식별자(ref_number) 또는 파일명(URL)을 제목에 병합 ---
+    df['title'] = df.apply(enhance_document_title, axis=1)
 
     st.sidebar.header("📊 데이터 처리 현황")
     total, sum_cnt, sum_pct, emb_cnt, emb_pct = calculate_progress(df, embedded_urls)
