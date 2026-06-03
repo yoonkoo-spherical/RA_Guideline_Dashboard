@@ -269,10 +269,25 @@ def ask_guideline(user_query: str, forced_docs: list = None, chat_history: list 
     final_prompt = f"[내부 DB 정보]\n{db_context_str}\n\n---\n\n[사용자 질의]\n{user_query}"
 
     try:
-        # history 매개변수를 추가하여 이전 대화 맥락을 유지
+        # Streamlit의 메시지(dict)를 Gemini SDK의 types.Content 객체로 안전하게 변환
+        formatted_history = []
+        if chat_history:
+            for msg in chat_history:
+                # Streamlit의 'assistant'를 Gemini의 'model'로 변환
+                role = "model" if msg.get("role") == "assistant" else "user"
+                text_content = str(msg.get("content", ""))
+                
+                formatted_history.append(
+                    types.Content(
+                        role=role,
+                        parts=[types.Part.from_text(text=text_content)]
+                    )
+                )
+
+        # 변환된 formatted_history를 주입
         chat = client.chats.create(
             model=REASONING_MODEL,
-            history=chat_history,
+            history=formatted_history,
             config=types.GenerateContentConfig(
                 system_instruction=system_instruction,
                 temperature=0.1, 
