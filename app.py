@@ -150,13 +150,11 @@ def enhance_document_title(row):
     base_title = str(row.get('title', '제목 없음')).strip()
     ref = str(row.get('ref_number', 'N/A')).strip()
     
-    # 1. 문서 식별자(ref_number)가 유효한 경우 제목 앞에 [식별자] 형태로 붙임
     if ref and ref.lower() not in ['n/a', 'none', 'nan', '']:
         if ref not in base_title:
             return f"[{ref}] {base_title}"
         return base_title
         
-    # 2. 식별자가 없는 경우, URL의 파일명(.pdf)을 디코딩하여 제목 뒤에 꼬리표로 붙임
     url = str(row.get('url', '')).strip()
     if url:
         filename = unquote(url.split('/')[-1].split('?')[0])
@@ -228,7 +226,6 @@ def main():
         st.warning("데이터베이스에 수집된 가이드라인 데이터가 없습니다.")
         return
         
-    # --- 문서 제목 중복 구분을 위해 식별자(ref_number) 또는 파일명(URL)을 제목에 병합 ---
     df['title'] = df.apply(enhance_document_title, axis=1)
 
     st.sidebar.header("📊 데이터 처리 현황")
@@ -372,15 +369,17 @@ def main():
                     with st.spinner("문서 대조 중..."):
                         try:
                             comparison_result = rag_engine.compare_multiple_documents(selected_docs_info)
-                            if "오류" in comparison_result: st.error("문서 비교 분석 중 오류가 발생했습니다.")
+                            # 고정된 에러 가로채기 조건을 변경하여 반환된 상세 오류 문자열을 그대로 노출
+                            if "오류" in comparison_result: 
+                                st.error(comparison_result)
                             else:
                                 cleaned_result = clean_html_tags(comparison_result)
                                 save_analysis_to_db(selected_docs_info, cleaned_result)
                                 st.divider()
                                 st.markdown("#### 📊 분석 결과")
                                 st.markdown(cleaned_result, unsafe_allow_html=True)
-                        except Exception:
-                            st.error("분석 서버와의 통신에 실패했습니다.")
+                        except Exception as e:
+                            st.error(f"분석 서버와의 통신 중 예기치 않은 오류가 발생했습니다: {e}")
 
     with tab_chat:
         st.markdown("#### 💬 규제 가이드라인 AI 어시스턴트 (Guideline Chatbot)")
@@ -436,17 +435,24 @@ def main():
 
             with st.spinner("답변 생성 중... (외부 규정 참조 시 대기열에 자동 등록됩니다)"):
                 try:
-                    response_text, sources = rag_engine.ask_guideline(prompt, forced_docs_info)
+                    # 대화 맥락 유지를 위해 st.session_state.messages를 백엔드에 인자로 함께 전달
+                    response_text, sources = rag_engine.ask_guideline(prompt, forced_docs_info, st.session_state.messages[:-1])
+                    
+                    # '오류가 발생' 문구 감지 시 단순 문구로 덮어쓰지 않고 상세 내용을 화면에 에러 컴포넌트로 띄우고 기록에 추가
                     if "오류가 발생" in response_text:
-                        st.error("AI가 답변을 생성하지 못했습니다.")
-                        st.session_state.messages.append({"role": "assistant", "content": "오류가 발생했습니다.", "sources": []})
+                        st.error(response_text)
+                        st.session_state.messages.append({"role": "assistant", "content": response_text, "sources": []})
+                        save_chat_to_db("assistant", response_text)
                     else:
                         st.session_state.messages.append({"role": "assistant", "content": response_text, "sources": sources})
                         save_chat_to_db("assistant", response_text)
                         queue_web_discovered_urls(response_text)
-                except Exception:
-                    st.error("예기치 않은 시스템 오류가 발생했습니다.")
-                    st.session_state.messages.append({"role": "assistant", "content": "시스템 오류가 발생했습니다.", "sources": []})
+                except Exception as e:
+                    # UI 및 통신 단의 예외 발생 시 상세 Traceback 텍스트 구조화
+                    detailed_ui_error = f"앱 호출 환경 내에서 시스템 오류가 발생했습니다.\n\n**오류 상세 내역:**\n```\n{str(e)}\n```"
+                    st.error(detailed_ui_error)
+                    st.session_state.messages.append({"role": "assistant", "content": detailed_ui_error, "sources": []})
+                    save_chat_to_db("assistant", detailed_ui_error)
             
             st.rerun()
 
@@ -572,7 +578,6 @@ def main():
                     file_name = uploaded_file.name
                     file_bytes = uploaded_file.read()
                     
-                    # manual_processor를 사용하여 즉시 처리 호출
                     success, message = manual_processor.process_file_immediately(
                         file_bytes, file_name, agency_input, category_input
                     )
