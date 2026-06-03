@@ -150,9 +150,15 @@ def rerank_chunks(user_query: str, chunks: list[dict], top_n: int = 10) -> list[
     except Exception:
         return chunks[:top_n]
 
-def ask_guideline(user_query: str, forced_docs: list = None):
+def ask_guideline(user_query: str, forced_docs: list = None, chat_history: list = None):
+    """
+    RAG 기반으로 가이드라인에 대한 답변을 생성합니다.
+    chat_history 매개변수를 통해 이전 대화 맥락을 유지할 수 있습니다.
+    """
     if forced_docs is None:
         forced_docs = []
+    if chat_history is None:
+        chat_history = []
 
     accessed_sources = []
     db_context_parts = []
@@ -241,7 +247,7 @@ def ask_guideline(user_query: str, forced_docs: list = None):
     if not db_context_str.strip():
         db_context_str = "내부 DB에서 관련된 정보를 찾지 못했습니다."
 
-    # 2단계: 메인 모델 (DB 데이터 주입 + 구글 웹 검색 연동)
+    # 2단계: 메인 모델 (DB 데이터 주입 + 구글 웹 검색 연동 + 이전 대화 기록 연동)
     system_instruction = """
     당신은 글로벌 규제기관(FDA, EMA, ICH 등)의 규정과 바이오시밀러 인허가에 정통한 30년 경력의 RA 최고 전문가입니다.
 
@@ -263,8 +269,10 @@ def ask_guideline(user_query: str, forced_docs: list = None):
     final_prompt = f"[내부 DB 정보]\n{db_context_str}\n\n---\n\n[사용자 질의]\n{user_query}"
 
     try:
+        # history 매개변수를 추가하여 이전 대화 맥락을 유지
         chat = client.chats.create(
             model=REASONING_MODEL,
+            history=chat_history,
             config=types.GenerateContentConfig(
                 system_instruction=system_instruction,
                 temperature=0.1, 
@@ -287,7 +295,14 @@ def ask_guideline(user_query: str, forced_docs: list = None):
         return response.text, unique_sources
 
     except Exception as e:
-        return f"답변 생성 중 오류가 발생했습니다: {str(e)}", []
+        # 상세 오류 내용을 사용자 UI와 반환 텍스트에 노출
+        error_details = str(e)
+        error_msg = f"답변 생성 중 오류가 발생했습니다.\n\n**오류 상세 내역:**\n```\n{error_details}\n```"
+        try:
+            st.error(error_msg)
+        except Exception:
+            pass
+        return error_msg, []
 
 
 def extract_core_content(text: str, query: str, max_length: int) -> str:
@@ -369,4 +384,11 @@ def compare_multiple_documents(docs_info, user_query: str = "위 문서들을 �
         return response.text
 
     except Exception as e:
-        return f"문서 비교 분석 중 오류가 발생했습니다: {str(e)}"
+        # 상세 오류 내용을 사용자 UI와 반환 텍스트에 노출
+        error_details = str(e)
+        error_msg = f"문서 비교 분석 중 오류가 발생했습니다.\n\n**오류 상세 내역:**\n```\n{error_details}\n```"
+        try:
+            st.error(error_msg)
+        except Exception:
+            pass
+        return error_msg
