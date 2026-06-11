@@ -5,7 +5,7 @@ import rag_engine
 import json
 import markdown
 import time
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from collections import defaultdict
 import re
 import requests
@@ -72,7 +72,7 @@ def save_chat_to_db(role, content):
 
 def delete_old_chat_records():
     try:
-        seven_days_ago = (datetime.utcnow() - timedelta(days=7)).isoformat()
+        seven_days_ago = (datetime.now(timezone.utc) - timedelta(days=7)).isoformat()
         supabase.table("chat_history").delete().lt("created_at", seven_days_ago).execute()
     except Exception:
         pass
@@ -225,17 +225,16 @@ def main():
         st.warning("데이터베이스에 수집된 가이드라인 데이터가 없습니다.")
         return
         
-    # DB에 is_pinned 컬럼이 생성되지 않았을 경우를 대비한 안전 장치 (에러 방지)
+    # DB에 is_pinned 컬럼이 정상 연동되도록 확인 및 캐스팅
     if 'is_pinned' not in df.columns:
         df['is_pinned'] = False
     else:
-        # None/NaN 값을 False로 변환하고 불리언 타입으로 확실히 캐스팅
         df['is_pinned'] = df['is_pinned'].fillna(False).astype(bool)
         
     df['title'] = df.apply(enhance_document_title, axis=1)
 
     st.sidebar.header("📊 데이터 처리 현황")
-    total, sum_cnt, sum_pct, emb_cnt, emb_pct = calculate_progress(df, embedded_urls)
+    total, sum_cnt, sum_pct, emb_cnt, embed_pct = calculate_progress(df, embedded_urls)
     st.sidebar.metric("전체 수집 문서", f"{total} 건")
     st.sidebar.progress(sum_pct / 100, text=f"AI 요약: {sum_pct}% ({sum_cnt}/{total})")
     st.sidebar.progress(embed_pct / 100, text=f"AI 임베딩: {embed_pct}% ({emb_cnt}/{total})")
@@ -252,7 +251,7 @@ def main():
     now = datetime.now()
     st.sidebar.header(f"💰 {now.year}년 {now.month}월 API 토큰 현황")
     
-    if st.sidebar.button("🔄 토큰 현황 수동 새로고침", use_container_width=True):
+    if st.sidebar.button("🔄 토큰 현황 수동 새로고침", width='stretch'):
         get_token_stats.clear()
         
     in_tokens, out_tokens, est_cost = get_token_stats()
@@ -294,7 +293,6 @@ def main():
         if search_query:
             tab1_df = tab1_df[tab1_df['title'].str.contains(search_query, case=False, na=False)]
         
-        # [DB 정렬 로직 적용] 1. 고정 문서, 2. 상태 점수, 3. 제목 순 정렬 후 인덱스 초기화
         tab1_df = tab1_df.sort_values(by=['is_pinned', 'status_score', 'title'], ascending=[False, False, True]).reset_index(drop=True)
         st.subheader(f"검색 결과: {len(tab1_df)} 건")
 
@@ -306,7 +304,6 @@ def main():
                 if isinstance(row.get('ai_summary'), str) and "추출 불가" in row['ai_summary']: status_icon = "⚪ [추출 실패]"
                 else: status_icon = "⏳ [대기중]"
 
-            # DB에서 읽어온 is_pinned 컬럼이 True면 아이콘 추가
             if row.get('is_pinned', False):
                 status_icon = "📌 [고정] " + status_icon
 
@@ -354,7 +351,7 @@ def main():
 
         multi_search_query = st.text_input("비교할 문서 검색 (쉼표(,)로 구분하여 다중 OR 검색 가능)", "")
         if multi_search_query:
-            keywords = [kw.strip() for kw in multi_search_query.split(",") if kw.strip()]
+            keywords = [kw.strip() for multi_search_query.split(",") if kw.strip()]
             if keywords:
                 pattern = '|'.join(map(re.escape, keywords))
                 embedded_only_df = embedded_only_df[embedded_only_df['title'].str.contains(pattern, case=False, na=False)]
@@ -362,10 +359,7 @@ def main():
         if embedded_only_df.empty:
             st.info("임베딩 및 요약이 정상적으로 완료된 문서가 없거나 검색 조건에 맞는 문서가 없습니다.")
         else:
-            # [DB 정렬 로직 적용] 1. 고정 문서, 2. 제목 순 정렬 후 인덱스 초기화
             embedded_only_df = embedded_only_df.sort_values(by=['is_pinned', 'title'], ascending=[False, True]).reset_index(drop=True)
-            
-            # 상태 컬럼에 플래그 반영
             embedded_only_df['상태'] = embedded_only_df.apply(lambda r: "📌 고정 완료" if r.get('is_pinned', False) else "🟢 준비 완료", axis=1)
             
             df_for_selection = embedded_only_df[['agency', 'title', 'category', '상태', 'url']].copy()
@@ -375,7 +369,7 @@ def main():
             edited_df = st.data_editor(
                 df_for_selection, hide_index=True,
                 column_config={"비교 선택": st.column_config.CheckboxColumn("비교 선택", default=False), "url": None},
-                disabled=["agency", "category", "title", "상태"], use_container_width=True
+                disabled=["agency", "category", "title", "상태"], width='stretch'
             )
 
             selected_rows = edited_df[edited_df["비교 선택"]]
@@ -415,10 +409,7 @@ def main():
         if chat_embedded_only_df.empty:
             st.info("선택 가능한 문서가 없습니다.")
         else:
-            # [DB 정렬 로직 적용] 1. 고정 문서, 2. 제목 순 정렬 후 인덱스 초기화
             chat_embedded_only_df = chat_embedded_only_df.sort_values(by=['is_pinned', 'title'], ascending=[False, True]).reset_index(drop=True)
-            
-            # 상태 컬럼에 플래그 반영
             chat_embedded_only_df['상태'] = chat_embedded_only_df.apply(lambda r: "📌 고정 완료" if r.get('is_pinned', False) else "🟢 준비 완료", axis=1)
             
             chat_df_for_selection = chat_embedded_only_df[['agency', 'title', 'category', '상태', 'url']].copy()
@@ -428,7 +419,7 @@ def main():
             edited_chat_df = st.data_editor(
                 chat_df_for_selection, hide_index=True,
                 column_config={"참조 선택": st.column_config.CheckboxColumn("참조 선택", default=False), "url": None},
-                disabled=["agency", "category", "title", "상태"], use_container_width=True
+                disabled=["agency", "category", "title", "상태"], width='stretch'
             )
             
             selected_chat_rows = edited_chat_df[edited_chat_df["참조 선택"]]
