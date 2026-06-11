@@ -608,3 +608,31 @@ def main():
 
     with tab_upload:
         st.markdown("#### 📤 로컬 PDF 가이드라인 업로드 및 즉시 분석")
+        col1, col2 = st.columns(2)
+        with col1: agency_input = st.selectbox("발행 기관 (Agency)", ["FDA", "EMA", "MHRA", "Health Canada", "ICH", "MFDS", "기타"])
+        with col2: category_input = st.text_input("카테고리/키워드 (예: CMC, 임상, 비임상)")
+
+        uploaded_file = st.file_uploader("PDF 파일 선택", type="pdf")
+
+        if st.button("즉시 데이터베이스 추가 및 분석 실행", type="primary"):
+            if uploaded_file is not None and category_input:
+                with st.spinner("파일 업로드 및 AI 통합 분석 중... (수 분이 소요될 수 있습니다)"):
+                    file_name = uploaded_file.name
+                    file_bytes = uploaded_file.read()
+                    
+                    success, message = manual_processor.process_file_immediately(
+                        file_bytes, file_name, agency_input, category_input
+                    )
+                    
+                    if success:
+                        st.success(f"완료: {message}")
+                        load_data.clear()
+                        time.sleep(1)
+                        st.rerun()
+                    else:
+                        st.error(f"처리 실패: {message}")
+            else:
+                st.warning("PDF 파일을 첨부하고 카테고리를 입력해 주십시오.")
+
+if __name__ == "__main__":
+    main()
