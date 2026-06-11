@@ -10,7 +10,7 @@ from collections import defaultdict
 import re
 import requests
 from urllib.parse import unquote
-import manual_processor
+import manual_processor  # 추가된 모듈
 
 @st.cache_resource
 def init_connection():
@@ -146,6 +146,7 @@ def infer_agency_from_url(url):
     else: return "기타"
 
 def enhance_document_title(row):
+    """문서 식별자 또는 파일명을 활용하여 중복되는 제목을 구체화합니다."""
     base_title = str(row.get('title', '제목 없음')).strip()
     ref = str(row.get('ref_number', 'N/A')).strip()
     
@@ -225,20 +226,13 @@ def main():
         st.warning("데이터베이스에 수집된 가이드라인 데이터가 없습니다.")
         return
         
-    # DB에 is_pinned 컬럼이 생성되지 않았을 경우를 대비한 안전 장치 (에러 방지)
-    if 'is_pinned' not in df.columns:
-        df['is_pinned'] = False
-    else:
-        # None/NaN 값을 False로 변환하고 불리언 타입으로 확실히 캐스팅
-        df['is_pinned'] = df['is_pinned'].fillna(False).astype(bool)
-        
     df['title'] = df.apply(enhance_document_title, axis=1)
 
     st.sidebar.header("📊 데이터 처리 현황")
     total, sum_cnt, sum_pct, emb_cnt, emb_pct = calculate_progress(df, embedded_urls)
     st.sidebar.metric("전체 수집 문서", f"{total} 건")
     st.sidebar.progress(sum_pct / 100, text=f"AI 요약: {sum_pct}% ({sum_cnt}/{total})")
-    st.sidebar.progress(embed_pct / 100, text=f"AI 임베딩: {embed_pct}% ({emb_cnt}/{total})")
+    st.sidebar.progress(emb_pct / 100, text=f"AI 임베딩: {emb_pct}% ({emb_cnt}/{total})")
     st.sidebar.divider()
 
     agencies = df['agency'].dropna().unique().tolist()
@@ -265,7 +259,7 @@ def main():
         "📄 문서 검색", "🔄 신/구버전 비교", "⚖️ 다중 문서 비교", "💬 Guideline Chatbot", "🗂️ 사용 이력", "📤 PDF 수동 업로드"
     ])
 
-    filtered_df = df[(df['agency'].isin(selected_agencies)) & (df['category'].isin(selected_categories))].copy()
+    filtered_df = df[(df['agency'].isin(selected_agencies)) & (df['category'].isin(selected_categories))]
 
     def check_summary(text):
         if pd.isna(text) or str(text).strip() == "": return False
@@ -293,9 +287,7 @@ def main():
         tab1_df = filtered_df.copy()
         if search_query:
             tab1_df = tab1_df[tab1_df['title'].str.contains(search_query, case=False, na=False)]
-        
-        # [DB 정렬 로직 적용] 1. 고정 문서, 2. 상태 점수, 3. 제목 순 정렬 후 인덱스 초기화
-        tab1_df = tab1_df.sort_values(by=['is_pinned', 'status_score', 'title'], ascending=[False, False, True]).reset_index(drop=True)
+        tab1_df = tab1_df.sort_values(by=['status_score', 'title'], ascending=[False, True])
         st.subheader(f"검색 결과: {len(tab1_df)} 건")
 
         for index, row in tab1_df.iterrows():
@@ -305,10 +297,6 @@ def main():
             else:
                 if isinstance(row.get('ai_summary'), str) and "추출 불가" in row['ai_summary']: status_icon = "⚪ [추출 실패]"
                 else: status_icon = "⏳ [대기중]"
-
-            # DB에서 읽어온 is_pinned 컬럼이 True면 아이콘 추가
-            if row.get('is_pinned', False):
-                status_icon = "📌 [고정] " + status_icon
 
             agency_flag = get_agency_flag(row['agency']) 
 
@@ -362,16 +350,10 @@ def main():
         if embedded_only_df.empty:
             st.info("임베딩 및 요약이 정상적으로 완료된 문서가 없거나 검색 조건에 맞는 문서가 없습니다.")
         else:
-            # [DB 정렬 로직 적용] 1. 고정 문서, 2. 제목 순 정렬 후 인덱스 초기화
-            embedded_only_df = embedded_only_df.sort_values(by=['is_pinned', 'title'], ascending=[False, True]).reset_index(drop=True)
-            
-            # 상태 컬럼에 플래그 반영
-            embedded_only_df['상태'] = embedded_only_df.apply(lambda r: "📌 고정 완료" if r.get('is_pinned', False) else "🟢 준비 완료", axis=1)
-            
+            embedded_only_df['상태'] = "🟢 준비 완료"
             df_for_selection = embedded_only_df[['agency', 'title', 'category', '상태', 'url']].copy()
             df_for_selection['agency'] = df_for_selection['agency'].apply(lambda x: f"{get_agency_flag(x)} {x}")
             df_for_selection.insert(0, "비교 선택", False)
-            
             edited_df = st.data_editor(
                 df_for_selection, hide_index=True,
                 column_config={"비교 선택": st.column_config.CheckboxColumn("비교 선택", default=False), "url": None},
@@ -387,6 +369,7 @@ def main():
                     with st.spinner("문서 대조 중..."):
                         try:
                             comparison_result = rag_engine.compare_multiple_documents(selected_docs_info)
+                            # 고정된 에러 가로채기 조건을 변경하여 반환된 상세 오류 문자열을 그대로 노출
                             if "오류" in comparison_result: 
                                 st.error(comparison_result)
                             else:
@@ -415,12 +398,7 @@ def main():
         if chat_embedded_only_df.empty:
             st.info("선택 가능한 문서가 없습니다.")
         else:
-            # [DB 정렬 로직 적용] 1. 고정 문서, 2. 제목 순 정렬 후 인덱스 초기화
-            chat_embedded_only_df = chat_embedded_only_df.sort_values(by=['is_pinned', 'title'], ascending=[False, True]).reset_index(drop=True)
-            
-            # 상태 컬럼에 플래그 반영
-            chat_embedded_only_df['상태'] = chat_embedded_only_df.apply(lambda r: "📌 고정 완료" if r.get('is_pinned', False) else "🟢 준비 완료", axis=1)
-            
+            chat_embedded_only_df['상태'] = "🟢 준비 완료"
             chat_df_for_selection = chat_embedded_only_df[['agency', 'title', 'category', '상태', 'url']].copy()
             chat_df_for_selection['agency'] = chat_df_for_selection['agency'].apply(lambda x: f"{get_agency_flag(x)} {x}")
             chat_df_for_selection.insert(0, "참조 선택", False)
@@ -428,7 +406,8 @@ def main():
             edited_chat_df = st.data_editor(
                 chat_df_for_selection, hide_index=True,
                 column_config={"참조 선택": st.column_config.CheckboxColumn("참조 선택", default=False), "url": None},
-                disabled=["agency", "category", "title", "상태"], use_container_width=True
+                disabled=["agency", "category", "title", "상태"], use_container_width=True,
+                key="chat_data_editor"
             )
             
             selected_chat_rows = edited_chat_df[edited_chat_df["참조 선택"]]
@@ -456,7 +435,10 @@ def main():
 
             with st.spinner("답변 생성 중... (외부 규정 참조 시 대기열에 자동 등록됩니다)"):
                 try:
+                    # 대화 맥락 유지를 위해 st.session_state.messages를 백엔드에 인자로 함께 전달
                     response_text, sources = rag_engine.ask_guideline(prompt, forced_docs_info, st.session_state.messages[:-1])
+                    
+                    # '오류가 발생' 문구 감지 시 단순 문구로 덮어쓰지 않고 상세 내용을 화면에 에러 컴포넌트로 띄우고 기록에 추가
                     if "오류가 발생" in response_text:
                         st.error(response_text)
                         st.session_state.messages.append({"role": "assistant", "content": response_text, "sources": []})
@@ -466,6 +448,7 @@ def main():
                         save_chat_to_db("assistant", response_text)
                         queue_web_discovered_urls(response_text)
                 except Exception as e:
+                    # UI 및 통신 단의 예외 발생 시 상세 Traceback 텍스트 구조화
                     detailed_ui_error = f"앱 호출 환경 내에서 시스템 오류가 발생했습니다.\n\n**오류 상세 내역:**\n```\n{str(e)}\n```"
                     st.error(detailed_ui_error)
                     st.session_state.messages.append({"role": "assistant", "content": detailed_ui_error, "sources": []})
