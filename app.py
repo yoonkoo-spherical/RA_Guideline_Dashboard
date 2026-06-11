@@ -15,12 +15,11 @@ import manual_processor  # 추가된 모듈
 # ==============================================================================
 # [최상단 고정 문서 설정] 
 # 최상단에 고정하고자 하는 문서의 파일명, 식별자, 또는 제목의 핵심 키워드를 입력하십시오.
-# 해당 키워드가 포함된 문서는 모든 탭의 목록에서 최상단에 고정됩니다.
 # ==============================================================================
 PINNED_KEYWORDS = [
     "2013_223_FULL_EN_TXT",  # EU Variations 가이드라인 파일명 키워드
-    "Variation",             # 예시 키워드 2
-    "EMA"                    # 예시 키워드 3 (필요에 따라 수정 가능)
+    "Variation",             
+    "EMA"                    
 ]
 
 def check_pinned_status(row):
@@ -307,7 +306,7 @@ def main():
         st.sidebar.divider()
         st.sidebar.error(f"⚠️ 데이터 불일치 문서: {error_count}건\n\n(요약은 없으나 벡터 DB에 데이터가 존재합니다. '문서 검색' 탭에서 확인하십시오.)")
 
-    # [공통 적용] 필터링된 전체 데이터프레임에 고정 여부 플래그 할당 (1: 고정, 0: 일반)
+    # 필터링된 전체 데이터프레임에 고정 여부 플래그 할당
     filtered_df['is_pinned'] = filtered_df.apply(check_pinned_status, axis=1)
 
     with tab_search:
@@ -316,8 +315,8 @@ def main():
         if search_query:
             tab1_df = tab1_df[tab1_df['title'].str.contains(search_query, case=False, na=False)]
         
-        # 고정 플래그(is_pinned)를 정렬 최우선 순위로 배치 (is_pinned: 내림차순, status_score: 내림차순)
-        tab1_df = tab1_df.sort_values(by=['is_pinned', 'status_score', 'title'], ascending=[False, False, True])
+        # 고정 정렬 후 인덱스 초기화로 참조 예외 방지
+        tab1_df = tab1_df.sort_values(by=['is_pinned', 'status_score', 'title'], ascending=[False, False, True]).reset_index(drop=True)
         st.subheader(f"검색 결과: {len(tab1_df)} 건")
 
         for index, row in tab1_df.iterrows():
@@ -328,7 +327,6 @@ def main():
                 if isinstance(row.get('ai_summary'), str) and "추출 불가" in row['ai_summary']: status_icon = "⚪ [추출 실패]"
                 else: status_icon = "⏳ [대기중]"
 
-            # 상단 고정 문서인 경우 시각적 표식 부가
             if row['is_pinned'] == 1:
                 status_icon = "📌 [고정] " + status_icon
 
@@ -384,10 +382,9 @@ def main():
         if embedded_only_df.empty:
             st.info("임베딩 및 요약이 정상적으로 완료된 문서가 없거나 검색 조건에 맞는 문서가 없습니다.")
         else:
-            # 고정 플래그(is_pinned) 기준으로 데이터프레임 최상단 우선순위 정렬 실행
-            embedded_only_df = embedded_only_df.sort_values(by=['is_pinned', 'title'], ascending=[False, True])
+            # 고정 정렬 수행 및 명시적 인덱스 초기화로 st.data_editor 에러 제어
+            embedded_only_df = embedded_only_df.sort_values(by=['is_pinned', 'title'], ascending=[False, True]).reset_index(drop=True)
             
-            # 사용자 화면 리스트 구분을 위한 상태 텍스트 분기 처리
             embedded_only_df['상태'] = embedded_only_df.apply(
                 lambda r: "📌 고정 완료" if r['is_pinned'] == 1 else "🟢 준비 완료", axis=1
             )
@@ -395,10 +392,12 @@ def main():
             df_for_selection = embedded_only_df[['agency', 'title', 'category', '상태', 'url']].copy()
             df_for_selection['agency'] = df_for_selection['agency'].apply(lambda x: f"{get_agency_flag(x)} {x}")
             df_for_selection.insert(0, "비교 선택", False)
+            
             edited_df = st.data_editor(
                 df_for_selection, hide_index=True,
                 column_config={"비교 선택": st.column_config.CheckboxColumn("비교 선택", default=False), "url": None},
-                disabled=["agency", "category", "title", "상태"], use_container_width=True
+                disabled=["agency", "category", "title", "상태"], use_container_width=True,
+                key="multi_data_editor"
             )
 
             selected_rows = edited_df[edited_df["비교 선택"]]
@@ -438,8 +437,8 @@ def main():
         if chat_embedded_only_df.empty:
             st.info("선택 가능한 문서가 없습니다.")
         else:
-            # 챗봇용 에디터 리스트 역시 고정 플래그(is_pinned) 기준 최상단 정렬 처리
-            chat_embedded_only_df = chat_embedded_only_df.sort_values(by=['is_pinned', 'title'], ascending=[False, True])
+            # 고정 정렬 수행 및 명시적 인덱스 초기화로 st.data_editor 에러 제어
+            chat_embedded_only_df = chat_embedded_only_df.sort_values(by=['is_pinned', 'title'], ascending=[False, True]).reset_index(drop=True)
             
             chat_embedded_only_df['상태'] = chat_embedded_only_df.apply(
                 lambda r: "📌 고정 완료" if r['is_pinned'] == 1 else "🟢 준비 완료", axis=1
