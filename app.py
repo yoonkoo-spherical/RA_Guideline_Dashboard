@@ -12,6 +12,31 @@ import requests
 from urllib.parse import unquote
 import manual_processor  # 추가된 모듈
 
+# ==============================================================================
+# [최상단 고정 문서 설정] 
+# 최상단에 고정하고자 하는 문서의 파일명, 식별자, 또는 제목의 핵심 키워드를 입력하십시오.
+# 해당 키워드가 포함된 문서는 모든 탭의 목록에서 최상단에 고정됩니다.
+# ==============================================================================
+PINNED_KEYWORDS = [
+    "2013_223_FULL_EN_TXT",  # EU Variations 가이드라인 파일명 키워드
+    "Variation",             # 예시 키워드 2
+    "EMA"                    # 예시 키워드 3 (필요에 따라 수정 가능)
+]
+
+def check_pinned_status(row):
+    """문서의 제목, URL, 식별자 중 고정 키워드가 포함되어 있는지 검사합니다."""
+    title = str(row.get('title', '')).lower()
+    url = str(row.get('url', '')).lower()
+    ref = str(row.get('ref_number', '')).lower()
+    
+    for kw in PINNED_KEYWORDS:
+        kw_lower = kw.lower().strip()
+        if not kw_lower:
+            continue
+        if kw_lower in title or kw_lower in url or kw_lower in ref:
+            return 1  # 고정 대상 문서
+    return 0  # 일반 문서
+
 @st.cache_resource
 def init_connection():
     url = st.secrets["SUPABASE_URL"]
@@ -232,7 +257,7 @@ def main():
     total, sum_cnt, sum_pct, emb_cnt, emb_pct = calculate_progress(df, embedded_urls)
     st.sidebar.metric("전체 수집 문서", f"{total} 건")
     st.sidebar.progress(sum_pct / 100, text=f"AI 요약: {sum_pct}% ({sum_cnt}/{total})")
-    st.sidebar.progress(emb_pct / 100, text=f"AI 임베딩: {emb_pct}% ({emb_cnt}/{total})")
+    st.sidebar.progress(embed_pct / 100, text=f"AI 임베딩: {embed_pct}% ({emb_cnt}/{total})")
     st.sidebar.divider()
 
     agencies = df['agency'].dropna().unique().tolist()
@@ -259,7 +284,7 @@ def main():
         "📄 문서 검색", "🔄 신/구버전 비교", "⚖️ 다중 문서 비교", "💬 Guideline Chatbot", "🗂️ 사용 이력", "📤 PDF 수동 업로드"
     ])
 
-    filtered_df = df[(df['agency'].isin(selected_agencies)) & (df['category'].isin(selected_categories))]
+    filtered_df = df[(df['agency'].isin(selected_agencies)) & (df['category'].isin(selected_categories))].copy()
 
     def check_summary(text):
         if pd.isna(text) or str(text).strip() == "": return False
@@ -282,12 +307,17 @@ def main():
         st.sidebar.divider()
         st.sidebar.error(f"⚠️ 데이터 불일치 문서: {error_count}건\n\n(요약은 없으나 벡터 DB에 데이터가 존재합니다. '문서 검색' 탭에서 확인하십시오.)")
 
+    # [공통 적용] 필터링된 전체 데이터프레임에 고정 여부 플래그 할당 (1: 고정, 0: 일반)
+    filtered_df['is_pinned'] = filtered_df.apply(check_pinned_status, axis=1)
+
     with tab_search:
         search_query = st.text_input("가이드라인 제목 검색", "")
         tab1_df = filtered_df.copy()
         if search_query:
             tab1_df = tab1_df[tab1_df['title'].str.contains(search_query, case=False, na=False)]
-        tab1_df = tab1_df.sort_values(by=['status_score', 'title'], ascending=[False, True])
+        
+        # 고정 플래그(is_pinned)를 정렬 최우선 순위로 배치 (is_pinned: 내림차순, status_score: 내림차순)
+        tab1_df = tab1_df.sort_values(by=['is_pinned', 'status_score', 'title'], ascending=[False, False, True])
         st.subheader(f"검색 결과: {len(tab1_df)} 건")
 
         for index, row in tab1_df.iterrows():
@@ -297,6 +327,10 @@ def main():
             else:
                 if isinstance(row.get('ai_summary'), str) and "추출 불가" in row['ai_summary']: status_icon = "⚪ [추출 실패]"
                 else: status_icon = "⏳ [대기중]"
+
+            # 상단 고정 문서인 경우 시각적 표식 부가
+            if row['is_pinned'] == 1:
+                status_icon = "📌 [고정] " + status_icon
 
             agency_flag = get_agency_flag(row['agency']) 
 
@@ -350,7 +384,14 @@ def main():
         if embedded_only_df.empty:
             st.info("임베딩 및 요약이 정상적으로 완료된 문서가 없거나 검색 조건에 맞는 문서가 없습니다.")
         else:
-            embedded_only_df['상태'] = "🟢 준비 완료"
+            # 고정 플래그(is_pinned) 기준으로 데이터프레임 최상단 우선순위 정렬 실행
+            embedded_only_df = embedded_only_df.sort_values(by=['is_pinned', 'title'], ascending=[False, True])
+            
+            # 사용자 화면 리스트 구분을 위한 상태 텍스트 분기 처리
+            embedded_only_df['상태'] = embedded_only_df.apply(
+                lambda r: "📌 고정 완료" if r['is_pinned'] == 1 else "🟢 준비 완료", axis=1
+            )
+            
             df_for_selection = embedded_only_df[['agency', 'title', 'category', '상태', 'url']].copy()
             df_for_selection['agency'] = df_for_selection['agency'].apply(lambda x: f"{get_agency_flag(x)} {x}")
             df_for_selection.insert(0, "비교 선택", False)
@@ -369,7 +410,6 @@ def main():
                     with st.spinner("문서 대조 중..."):
                         try:
                             comparison_result = rag_engine.compare_multiple_documents(selected_docs_info)
-                            # 고정된 에러 가로채기 조건을 변경하여 반환된 상세 오류 문자열을 그대로 노출
                             if "오류" in comparison_result: 
                                 st.error(comparison_result)
                             else:
@@ -398,7 +438,13 @@ def main():
         if chat_embedded_only_df.empty:
             st.info("선택 가능한 문서가 없습니다.")
         else:
-            chat_embedded_only_df['상태'] = "🟢 준비 완료"
+            # 챗봇용 에디터 리스트 역시 고정 플래그(is_pinned) 기준 최상단 정렬 처리
+            chat_embedded_only_df = chat_embedded_only_df.sort_values(by=['is_pinned', 'title'], ascending=[False, True])
+            
+            chat_embedded_only_df['상태'] = chat_embedded_only_df.apply(
+                lambda r: "📌 고정 완료" if r['is_pinned'] == 1 else "🟢 준비 완료", axis=1
+            )
+            
             chat_df_for_selection = chat_embedded_only_df[['agency', 'title', 'category', '상태', 'url']].copy()
             chat_df_for_selection['agency'] = chat_df_for_selection['agency'].apply(lambda x: f"{get_agency_flag(x)} {x}")
             chat_df_for_selection.insert(0, "참조 선택", False)
@@ -435,10 +481,7 @@ def main():
 
             with st.spinner("답변 생성 중... (외부 규정 참조 시 대기열에 자동 등록됩니다)"):
                 try:
-                    # 대화 맥락 유지를 위해 st.session_state.messages를 백엔드에 인자로 함께 전달
                     response_text, sources = rag_engine.ask_guideline(prompt, forced_docs_info, st.session_state.messages[:-1])
-                    
-                    # '오류가 발생' 문구 감지 시 단순 문구로 덮어쓰지 않고 상세 내용을 화면에 에러 컴포넌트로 띄우고 기록에 추가
                     if "오류가 발생" in response_text:
                         st.error(response_text)
                         st.session_state.messages.append({"role": "assistant", "content": response_text, "sources": []})
@@ -448,7 +491,6 @@ def main():
                         save_chat_to_db("assistant", response_text)
                         queue_web_discovered_urls(response_text)
                 except Exception as e:
-                    # UI 및 통신 단의 예외 발생 시 상세 Traceback 텍스트 구조화
                     detailed_ui_error = f"앱 호출 환경 내에서 시스템 오류가 발생했습니다.\n\n**오류 상세 내역:**\n```\n{str(e)}\n```"
                     st.error(detailed_ui_error)
                     st.session_state.messages.append({"role": "assistant", "content": detailed_ui_error, "sources": []})
@@ -566,31 +608,3 @@ def main():
 
     with tab_upload:
         st.markdown("#### 📤 로컬 PDF 가이드라인 업로드 및 즉시 분석")
-        col1, col2 = st.columns(2)
-        with col1: agency_input = st.selectbox("발행 기관 (Agency)", ["FDA", "EMA", "MHRA", "Health Canada", "ICH", "MFDS", "기타"])
-        with col2: category_input = st.text_input("카테고리/키워드 (예: CMC, 임상, 비임상)")
-
-        uploaded_file = st.file_uploader("PDF 파일 선택", type="pdf")
-
-        if st.button("즉시 데이터베이스 추가 및 분석 실행", type="primary"):
-            if uploaded_file is not None and category_input:
-                with st.spinner("파일 업로드 및 AI 통합 분석 중... (수 분이 소요될 수 있습니다)"):
-                    file_name = uploaded_file.name
-                    file_bytes = uploaded_file.read()
-                    
-                    success, message = manual_processor.process_file_immediately(
-                        file_bytes, file_name, agency_input, category_input
-                    )
-                    
-                    if success:
-                        st.success(f"완료: {message}")
-                        load_data.clear()
-                        time.sleep(1)
-                        st.rerun()
-                    else:
-                        st.error(f"처리 실패: {message}")
-            else:
-                st.warning("PDF 파일을 첨부하고 카테고리를 입력해 주십시오.")
-
-if __name__ == "__main__":
-    main()
