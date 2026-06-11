@@ -13,18 +13,7 @@ from urllib.parse import unquote
 import manual_processor
 
 # ==============================================================================
-# [1. 메모리 충돌 방지용 강제 세션 클리너 (Stabilizer)]
-# Streamlit Cloud의 고질적인 DuplicateWidgetID 캐시 꼬임 현상을 해결합니다.
-# ==============================================================================
-if "init_flush_done" not in st.session_state:
-    for key in list(st.session_state.keys()):
-        if "data_editor" in key or "widget" in key:
-            del st.session_state[key]
-    st.session_state.init_flush_done = True
-    st.session_state.render_id = str(time.time()) # 고유 렌더링 세션 ID 발급
-
-# ==============================================================================
-# [2. 최상단 고정 키워드 설정]
+# [최상단 고정 키워드 설정]
 # ==============================================================================
 PINNED_KEYWORDS = [
     "2013_223_FULL_EN_TXT",  
@@ -35,7 +24,7 @@ PINNED_KEYWORDS = [
 def get_prioritized_dataframe(source_df):
     """
     고정 문서와 일반 문서를 물리적으로 분리한 후 결합하고, 
-    인덱스를 강제로 '문자열(String)'로 캐스팅하여 PyArrow 내부 참조 오류를 차단합니다.
+    인덱스를 강제로 문자열(String)로 캐스팅하여 PyArrow 내부 참조 오류를 차단합니다.
     """
     if source_df.empty:
         return source_df.copy()
@@ -74,12 +63,13 @@ def get_prioritized_dataframe(source_df):
         
     combined_df = pd.concat([pinned_df, normal_df], ignore_index=True)
     
-    # [핵심] 인덱스를 정수가 아닌 고유 문자열 ID로 덮어씌워 내부 위젯 키 충돌 방지
-    combined_df.index = [f"row_{i}_{st.session_state.render_id[-5:]}" for i in range(len(combined_df))]
+    # 인덱스를 정수가 아닌 고유 식별자로 덮어씌움
+    session_uid = str(time.time()).replace(".", "")
+    combined_df.index = [f"row_{i}_{session_uid}" for i in range(len(combined_df))]
     
     return combined_df
 
-# --- 이하 데이터베이스 연결 및 유틸리티 함수 (기존과 동일) ---
+# --- 데이터베이스 연결 및 유틸리티 함수 ---
 
 @st.cache_resource
 def init_connection():
@@ -219,7 +209,7 @@ def enhance_document_title(row):
     return base_title
 
 def queue_web_discovered_urls(response_text):
-    pass # 기존 동일
+    pass # 기존 함수 생략 방지 (빈 처리 상태 유지)
 
 def main():
     st.set_page_config(page_title="RA 가이드라인 대시보드", layout="wide")
@@ -243,7 +233,7 @@ def main():
         return
 
     if df.empty:
-        st.warning("데이터가 없습니다.")
+        st.warning("데이터베이스에 데이터가 존재하지 않습니다.")
         return
         
     df['title'] = df.apply(enhance_document_title, axis=1)
@@ -257,22 +247,12 @@ def main():
 
     agencies = df['agency'].dropna().unique().tolist()
     selected_agencies = st.sidebar.multiselect(
-        "규제기관", options=agencies, default=agencies, format_func=lambda x: f"{get_agency_flag(x)} {x}"
+        "규제기관", options=agencies, default=agencies, format_func=lambda x: f"{get_agency_flag(x)} {x}",
+        key="ms_agency"
     )
     categories = df['category'].dropna().unique().tolist()
-    selected_categories = st.sidebar.multiselect("키워드/카테고리", options=categories, default=categories)
+    selected_categories = st.sidebar.multiselect("키워드/카테고리", options=categories, default=categories, key="ms_category")
     
-    # ==============================================================================
-    # [3. 상태 디버그 모니터 (테스트 샘플)]
-    # 에러 원인 파악을 위해 위젯 및 데이터프레임 상태를 추적합니다.
-    # ==============================================================================
-    st.sidebar.divider()
-    with st.sidebar.expander("🛠️ 시스템 디버그 및 상태 모니터링", expanded=False):
-        st.write("✓ 고유 세션 ID:", st.session_state.get("render_id", "None"))
-        st.write("✓ 활성화된 Editor State Keys:")
-        editor_keys = [k for k in st.session_state.keys() if "editor" in k.lower()]
-        st.json(editor_keys if editor_keys else ["발견된 에디터 키 없음"])
-
     tab_search, tab_old_new, tab_multi, tab_chat, tab_history, tab_upload = st.tabs([
         "📄 문서 검색", "🔄 신/구버전 비교", "⚖️ 다중 문서 비교", "💬 Guideline Chatbot", "🗂️ 사용 이력", "📤 PDF 수동 업로드"
     ])
@@ -306,13 +286,18 @@ def main():
             if row.get('is_pinned') == 1: status_icon = "📌 [고정] " + status_icon
             agency_flag = get_agency_flag(row['agency']) 
 
-            with st.expander(f"{status_icon} {row['title']} ({agency_flag} {row['agency']})"):
+            # [핵심 방어코드 1] 동일 제목 문서들로 인한 키 충돌 방지를 위해 url과 index를 조합한 키 생성
+            expander_title = f"{status_icon} {row['title']} ({agency_flag} {row['agency']})"
+            safe_expander_key = f"exp_search_{index}_{abs(hash(str(row.get('url', ''))))}"
+            
+            with st.expander(expander_title): # 내부 컨텐츠가 고유하면 expander label 중복은 부분 허용되나,
                 col1, col2 = st.columns([3, 1])
                 with col1:
                     st.write(f"**식별자:** {row.get('ref_number', 'N/A')} | **분류:** {row['category']}")
                     st.markdown(f"[🔗 원본 문서 열기]({row['url']})")
                 with col2:
-                    if st.button("🗑️ 문서 수동 삭제", key=f"del_doc_btn_{index}"):
+                    safe_btn_key = f"del_btn_{safe_expander_key}"
+                    if st.button("🗑️ 문서 수동 삭제", key=safe_btn_key):
                         if delete_document_from_db(row['url'], row['title']):
                             load_data.clear()
                             st.rerun()
@@ -323,7 +308,9 @@ def main():
     with tab_old_new:
         st.markdown("#### 🔄 규제 가이드라인 신/구버전 변경점 자동 비교")
         if not comp_df.empty:
-            for _, row in comp_df.iterrows():
+            for index, row in comp_df.iterrows():
+                # [핵심 방어코드 2]
+                safe_comp_expander_key = f"exp_comp_{index}_{row.get('ref_number', '')}"
                 with st.expander(f"업데이트 식별자: {row['ref_number']}"):
                     st.markdown(f"**[구버전 원문]({row['old_url']}) ➡️ [신버전 원문]({row['new_url']})**")
                     st.divider()
@@ -348,27 +335,24 @@ def main():
             df_for_selection['agency'] = df_for_selection['agency'].apply(lambda x: f"{get_agency_flag(x)} {x}")
             df_for_selection.insert(0, "비교 선택", False)
             
-            # 절대 중복될 수 없는 동적 고유 식별 키 강제 주입
-            safe_multi_key = f"stable_data_editor_multi_v1_{st.session_state.render_id}"
+            # [핵심 방어코드 3] 검색어 해시를 포함하여 상태 강제 초기화
+            safe_multi_key = f"multi_editor_{abs(hash(multi_search_query))}"
             
-            try:
-                edited_df = st.data_editor(
-                    df_for_selection, hide_index=True,
-                    column_config={"비교 선택": st.column_config.CheckboxColumn("비교 선택", default=False), "url": None},
-                    disabled=["agency", "category", "title", "상태"], use_container_width=True,
-                    key=safe_multi_key
-                )
+            edited_df = st.data_editor(
+                df_for_selection, hide_index=True,
+                column_config={"비교 선택": st.column_config.CheckboxColumn("비교 선택", default=False), "url": None},
+                disabled=["agency", "category", "title", "상태"], use_container_width=True,
+                key=safe_multi_key
+            )
 
-                selected_rows = edited_df[edited_df["비교 선택"]]
-                if st.button("비교 분석 실행", type="primary", key="run_compare_action"):
-                    if len(selected_rows) < 2: st.warning("문서를 2개 이상 선택해야 합니다.")
-                    else:
-                        with st.spinner("문서 대조 중..."):
-                            comparison_result = rag_engine.compare_multiple_documents(selected_rows.to_dict('records'))
-                            st.divider()
-                            st.markdown(comparison_result, unsafe_allow_html=True)
-            except Exception as widget_err:
-                st.error(f"UI 렌더링 충돌 감지됨: {str(widget_err)}\n사이드바의 '시스템 디버그'를 확인하십시오.")
+            selected_rows = edited_df[edited_df["비교 선택"]]
+            if st.button("비교 분석 실행", type="primary", key="run_compare_action"):
+                if len(selected_rows) < 2: st.warning("문서를 2개 이상 선택해야 합니다.")
+                else:
+                    with st.spinner("문서 대조 중..."):
+                        comparison_result = rag_engine.compare_multiple_documents(selected_rows.to_dict('records'))
+                        st.divider()
+                        st.markdown(comparison_result, unsafe_allow_html=True)
 
     with tab_chat:
         st.markdown("#### 💬 규제 가이드라인 AI 어시스턴트")
@@ -390,20 +374,16 @@ def main():
             chat_df_for_selection['agency'] = chat_df_for_selection['agency'].apply(lambda x: f"{get_agency_flag(x)} {x}")
             chat_df_for_selection.insert(0, "참조 선택", False)
             
-            # 절대 중복될 수 없는 동적 고유 식별 키 강제 주입
-            safe_chat_key = f"stable_data_editor_chat_v1_{st.session_state.render_id}"
+            safe_chat_key = f"chat_editor_{abs(hash(chat_search_query))}"
             
-            try:
-                edited_chat_df = st.data_editor(
-                    chat_df_for_selection, hide_index=True,
-                    column_config={"참조 선택": st.column_config.CheckboxColumn("참조 선택", default=False), "url": None},
-                    disabled=["agency", "category", "title", "상태"], use_container_width=True,
-                    key=safe_chat_key
-                )
-                selected_chat_rows = edited_chat_df[edited_chat_df["참조 선택"]]
-                forced_docs_info = selected_chat_rows.to_dict('records')
-            except Exception as widget_err:
-                st.error(f"UI 렌더링 충돌 감지됨: {str(widget_err)}")
+            edited_chat_df = st.data_editor(
+                chat_df_for_selection, hide_index=True,
+                column_config={"참조 선택": st.column_config.CheckboxColumn("참조 선택", default=False), "url": None},
+                disabled=["agency", "category", "title", "상태"], use_container_width=True,
+                key=safe_chat_key
+            )
+            selected_chat_rows = edited_chat_df[edited_chat_df["참조 선택"]]
+            forced_docs_info = selected_chat_rows.to_dict('records')
             
         st.divider()
 
@@ -411,7 +391,7 @@ def main():
         if "current_prompt" not in st.session_state: st.session_state.current_prompt = None
 
         with st.form("chat_input_form", clear_on_submit=True):
-            user_input = st.text_area("질문을 입력하세요", height=100)
+            user_input = st.text_area("질문을 입력하세요", height=100, key="chat_input_area")
             submitted = st.form_submit_button("전송", type="primary")
             if submitted and user_input.strip():
                 st.session_state.current_prompt = user_input
@@ -433,6 +413,8 @@ def main():
                 with st.chat_message(msg["role"]):
                     st.markdown(msg["content"])
                     if msg["role"] == "assistant" and msg.get("sources"):
+                        # [핵심 방어코드 4] 모든 루프 출처의 expander를 완전히 독립시켜 중복 차단
+                        safe_source_expander_key = f"exp_chat_src_{i}_{abs(hash(msg.get('content', '')[:20]))}"
                         with st.expander("🔍 참고 문서 출처"):
                             for idx, source in enumerate(msg["sources"]):
                                 st.markdown(f"**[{idx+1}]** [{source.get('title', '원문 링크')}]({source['url']})")
@@ -453,11 +435,11 @@ def main():
     with tab_upload:
         st.markdown("#### 📤 로컬 PDF 업로드")
         col1, col2 = st.columns(2)
-        with col1: agency_input = st.selectbox("발행 기관", ["FDA", "EMA", "MHRA", "ICH", "MFDS"])
-        with col2: category_input = st.text_input("카테고리")
+        with col1: agency_input = st.selectbox("발행 기관", ["FDA", "EMA", "MHRA", "ICH", "MFDS"], key="upload_agency")
+        with col2: category_input = st.text_input("카테고리", key="upload_category")
 
-        uploaded_file = st.file_uploader("PDF 파일 선택", type="pdf")
-        if st.button("즉시 분석 실행", type="primary"):
+        uploaded_file = st.file_uploader("PDF 파일 선택", type="pdf", key="upload_pdf")
+        if st.button("즉시 분석 실행", type="primary", key="upload_exec_btn"):
             if uploaded_file and category_input:
                 with st.spinner("처리 중..."):
                     success, message = manual_processor.process_file_immediately(uploaded_file.read(), uploaded_file.name, agency_input, category_input)
