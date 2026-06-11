@@ -351,7 +351,7 @@ def main():
 
         multi_search_query = st.text_input("비교할 문서 검색 (쉼표(,)로 구분하여 다중 OR 검색 가능)", "")
         if multi_search_query:
-            keywords = [kw.strip() for multi_search_query.split(",") if kw.strip()]
+            keywords = [kw.strip() for kw in multi_search_query.split(",") if kw.strip()]
             if keywords:
                 pattern = '|'.join(map(re.escape, keywords))
                 embedded_only_df = embedded_only_df[embedded_only_df['title'].str.contains(pattern, case=False, na=False)]
