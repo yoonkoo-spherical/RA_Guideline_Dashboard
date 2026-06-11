@@ -15,10 +15,11 @@ import manual_processor  # 추가된 모듈
 # ==============================================================================
 # [최상단 고정 문서 설정] 
 # 최상단에 고정하고자 하는 문서의 파일명, 식별자, 또는 제목의 핵심 키워드를 입력하십시오.
+# 해당 키워드가 포함된 문서는 모든 탭의 목록에서 최상단에 고정됩니다.
 # ==============================================================================
 PINNED_KEYWORDS = [
     "2013_223_FULL_EN_TXT",  # EU Variations 가이드라인 파일명 키워드
-    "Variation",             
+    "H149",             
     "EMA"                    
 ]
 
@@ -270,7 +271,7 @@ def main():
     now = datetime.now()
     st.sidebar.header(f"💰 {now.year}년 {now.month}월 API 토큰 현황")
     
-    if st.sidebar.button("🔄 토큰 현황 수동 새로고침", use_container_width=True):
+    if st.sidebar.button("🔄 토큰 현황 수동 새로고침", use_container_width=True, key="refresh_token_btn"):
         get_token_stats.clear()
         
     in_tokens, out_tokens, est_cost = get_token_stats()
@@ -306,16 +307,16 @@ def main():
         st.sidebar.divider()
         st.sidebar.error(f"⚠️ 데이터 불일치 문서: {error_count}건\n\n(요약은 없으나 벡터 DB에 데이터가 존재합니다. '문서 검색' 탭에서 확인하십시오.)")
 
-    # 필터링된 전체 데이터프레임에 고정 여부 플래그 할당
+    # 필터링된 데이터프레임에 고정 여부 플래그 할당
     filtered_df['is_pinned'] = filtered_df.apply(check_pinned_status, axis=1)
 
     with tab_search:
-        search_query = st.text_input("가이드라인 제목 검색", "")
+        search_query = st.text_input("가이드라인 제목 검색", "", key="main_search_input")
         tab1_df = filtered_df.copy()
         if search_query:
             tab1_df = tab1_df[tab1_df['title'].str.contains(search_query, case=False, na=False)]
         
-        # 고정 정렬 후 인덱스 초기화로 참조 예외 방지
+        # [핵심 수정] 정렬 후 반드시 인덱스를 초기화하여 참조 오류 방지
         tab1_df = tab1_df.sort_values(by=['is_pinned', 'status_score', 'title'], ascending=[False, False, True]).reset_index(drop=True)
         st.subheader(f"검색 결과: {len(tab1_df)} 건")
 
@@ -340,7 +341,9 @@ def main():
                     st.markdown(f"[🔗 원본 문서 열기]({row['url']})")
                 
                 with col2:
-                    if st.button("🗑️ 문서 수동 삭제", key=f"del_doc_{index}"):
+                    # [핵심 수정] 버튼의 key에 문서 URL 해시값을 포함하여 동적 충돌 완전 배제
+                    safe_hash = abs(hash(str(row.get('url', index))))
+                    if st.button("🗑️ 문서 수동 삭제", key=f"del_doc_{index}_{safe_hash}"):
                         with st.spinner("문서 및 임베딩 데이터를 삭제 중입니다..."):
                             if delete_document_from_db(row['url'], row['title']):
                                 st.success("문서가 성공적으로 삭제되었습니다.")
@@ -372,7 +375,7 @@ def main():
         st.markdown("#### ⚖️ 다중 문서 수동 비교 분석")
         embedded_only_df = filtered_df[filtered_df['status_score'] == 4].copy() 
 
-        multi_search_query = st.text_input("비교할 문서 검색 (쉼표(,)로 구분하여 다중 OR 검색 가능)", "")
+        multi_search_query = st.text_input("비교할 문서 검색 (쉼표(,)로 구분하여 다중 OR 검색 가능)", "", key="multi_tab_search_input")
         if multi_search_query:
             keywords = [kw.strip() for kw in multi_search_query.split(",") if kw.strip()]
             if keywords:
@@ -382,7 +385,7 @@ def main():
         if embedded_only_df.empty:
             st.info("임베딩 및 요약이 정상적으로 완료된 문서가 없거나 검색 조건에 맞는 문서가 없습니다.")
         else:
-            # 고정 정렬 수행 및 명시적 인덱스 초기화로 st.data_editor 에러 제어
+            # [핵심 수정] 정렬 후 반드시 인덱스 초기화
             embedded_only_df = embedded_only_df.sort_values(by=['is_pinned', 'title'], ascending=[False, True]).reset_index(drop=True)
             
             embedded_only_df['상태'] = embedded_only_df.apply(
@@ -393,15 +396,16 @@ def main():
             df_for_selection['agency'] = df_for_selection['agency'].apply(lambda x: f"{get_agency_flag(x)} {x}")
             df_for_selection.insert(0, "비교 선택", False)
             
+            # [핵심 수정] 고유한 explicit key 할당
             edited_df = st.data_editor(
                 df_for_selection, hide_index=True,
                 column_config={"비교 선택": st.column_config.CheckboxColumn("비교 선택", default=False), "url": None},
                 disabled=["agency", "category", "title", "상태"], use_container_width=True,
-                key="multi_data_editor"
+                key="multi_docs_editor_widget"
             )
 
             selected_rows = edited_df[edited_df["비교 선택"]]
-            if st.button("비교 분석 실행", type="primary"):
+            if st.button("비교 분석 실행", type="primary", key="run_multi_compare_btn"):
                 if len(selected_rows) < 2: 
                     st.warning("문서를 2개 이상 선택해야 합니다.")
                 else:
@@ -426,7 +430,7 @@ def main():
         st.markdown("##### 📌 필수 참조 문서 선택 (선택 사항)")
         chat_embedded_only_df = filtered_df[filtered_df['status_score'] == 4].copy()
 
-        chat_search_query = st.text_input("참조할 문서 검색 (쉼표(,)로 구분하여 다중 검색 가능)", "", key="chat_multi_search")
+        chat_search_query = st.text_input("참조할 문서 검색 (쉼표(,)로 구분하여 다중 검색 가능)", "", key="chat_tab_search_input")
         if chat_search_query:
             keywords = [kw.strip() for kw in chat_search_query.split(",") if kw.strip()]
             if keywords:
@@ -437,7 +441,7 @@ def main():
         if chat_embedded_only_df.empty:
             st.info("선택 가능한 문서가 없습니다.")
         else:
-            # 고정 정렬 수행 및 명시적 인덱스 초기화로 st.data_editor 에러 제어
+            # [핵심 수정] 정렬 후 반드시 인덱스 초기화
             chat_embedded_only_df = chat_embedded_only_df.sort_values(by=['is_pinned', 'title'], ascending=[False, True]).reset_index(drop=True)
             
             chat_embedded_only_df['상태'] = chat_embedded_only_df.apply(
@@ -448,11 +452,12 @@ def main():
             chat_df_for_selection['agency'] = chat_df_for_selection['agency'].apply(lambda x: f"{get_agency_flag(x)} {x}")
             chat_df_for_selection.insert(0, "참조 선택", False)
             
+            # [핵심 수정] 고유한 explicit key 할당 (이전과 다른 완전 새로운 키명으로 세션 잔여 충돌 차단)
             edited_chat_df = st.data_editor(
                 chat_df_for_selection, hide_index=True,
                 column_config={"참조 선택": st.column_config.CheckboxColumn("참조 선택", default=False), "url": None},
                 disabled=["agency", "category", "title", "상태"], use_container_width=True,
-                key="chat_data_editor"
+                key="chat_docs_editor_widget"
             )
             
             selected_chat_rows = edited_chat_df[edited_chat_df["참조 선택"]]
@@ -464,7 +469,7 @@ def main():
         if "current_prompt" not in st.session_state: st.session_state.current_prompt = None
 
         with st.form("chat_input_form", clear_on_submit=True):
-            user_input = st.text_area("질문을 입력하세요 (줄바꿈: Enter, 전송: Ctrl+Enter 또는 '전송' 버튼 클릭)", height=100)
+            user_input = st.text_area("질문을 입력하세요 (줄바꿈: Enter, 전송: Ctrl+Enter 또는 '전송' 버튼 클릭)", height=100, key="chat_user_query_area")
             submitted = st.form_submit_button("전송", type="primary")
             if submitted and user_input.strip():
                 st.session_state.current_prompt = user_input
@@ -609,11 +614,11 @@ def main():
         st.markdown("#### 📤 로컬 PDF 가이드라인 업로드 및 즉시 분석")
         col1, col2 = st.columns(2)
         with col1: agency_input = st.selectbox("발행 기관 (Agency)", ["FDA", "EMA", "MHRA", "Health Canada", "ICH", "MFDS", "기타"])
-        with col2: category_input = st.text_input("카테고리/키워드 (예: CMC, 임상, 비임상)")
+        with col2: category_input = st.text_input("카테고리/키워드 (예: CMC, 임상, 비임상)", key="upload_category_input")
 
         uploaded_file = st.file_uploader("PDF 파일 선택", type="pdf")
 
-        if st.button("즉시 데이터베이스 추가 및 분석 실행", type="primary"):
+        if st.button("즉시 데이터베이스 추가 및 분석 실행", type="primary", key="upload_run_btn"):
             if uploaded_file is not None and category_input:
                 with st.spinner("파일 업로드 및 AI 통합 분석 중... (수 분이 소요될 수 있습니다)"):
                     file_name = uploaded_file.name
