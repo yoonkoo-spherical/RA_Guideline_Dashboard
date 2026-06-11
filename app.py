@@ -12,59 +12,6 @@ import requests
 from urllib.parse import unquote
 import manual_processor  # 추가된 모듈
 
-# ==============================================================================
-# [정적 고정 아키텍처: 최상단 고정 키워드 정의]
-# ==============================================================================
-PINNED_KEYWORDS = [
-    "2013_223_FULL_EN_TXT",  # EU Variations 가이드라인 파일명 핵심 키워드
-    "Variation",             
-    "EMA"                    
-]
-
-def prioritize_pinned_documents(source_df):
-    """
-    고정 가이드라인 문서와 일반 문서를 물리적으로 분리 정렬한 후,
-    인덱스를 완전 정수형(0, 1, 2...)으로 리셋하여 데이터 오염을 원천 차단합니다.
-    """
-    if source_df.empty:
-        return source_df.copy()
-        
-    working_df = source_df.copy()
-    
-    is_pinned_list = []
-    for _, row in working_df.iterrows():
-        title = str(row.get('title', '')).lower()
-        url = str(row.get('url', '')).lower()
-        ref = str(row.get('ref_number', '')).lower()
-        
-        pinned = False
-        for kw in PINNED_KEYWORDS:
-            kw_lower = kw.lower().strip()
-            if kw_lower and (kw_lower in title or kw_lower in url or kw_lower in ref):
-                pinned = True
-                break
-        is_pinned_list.append(True if pinned else False)
-        
-    working_df['is_pinned_flag'] = is_pinned_list
-    
-    pinned_df = working_df[working_df['is_pinned_flag'] == True]
-    normal_df = working_df[working_df['is_pinned_flag'] == False]
-    
-    sort_cols = ['title']
-    sort_ascending = [True]
-    if 'status_score' in working_df.columns:
-        sort_cols.insert(0, 'status_score')
-        sort_ascending.insert(0, False)
-    
-    if not pinned_df.empty:
-        pinned_df = pinned_df.sort_values(by=sort_cols, ascending=sort_ascending)
-    if not normal_df.empty:
-        normal_df = normal_df.sort_values(by=sort_cols, ascending=sort_ascending)
-        
-    # 데이터프레임 결합 시 고유 정수 인덱스 강제 재할당
-    combined_df = pd.concat([pinned_df, normal_df], ignore_index=True)
-    return combined_df
-
 @st.cache_resource
 def init_connection():
     url = st.secrets["SUPABASE_URL"]
@@ -188,6 +135,16 @@ def delete_document_from_db(doc_url, doc_title):
         st.error(f"데이터베이스 삭제 중 오류 발생: {e}")
         return False
 
+def infer_agency_from_url(url):
+    url_lower = url.lower()
+    if "fda.gov" in url_lower: return "FDA"
+    elif "ema.europa.eu" in url_lower: return "EMA"
+    elif "gov.uk" in url_lower: return "MHRA"
+    elif "canada.ca" in url_lower or "hc-sc.gc.ca" in url_lower: return "Health Canada"
+    elif "ich.org" in url_lower: return "ICH"
+    elif "mfds.go.kr" in url_lower: return "MFDS"
+    else: return "기타"
+
 def enhance_document_title(row):
     """문서 식별자 또는 파일명을 활용하여 중복되는 제목을 구체화합니다."""
     base_title = str(row.get('title', '제목 없음')).strip()
@@ -210,7 +167,39 @@ def enhance_document_title(row):
     return base_title
 
 def queue_web_discovered_urls(response_text):
-    pass # 백그라운드 탐색 파이프라인 연동 프로토콜 (동일)
+    markdown_links = re.findall(r'\[([^\]]+)\]\((https?://[^\)]+)\)', response_text)
+    raw_urls = re.findall(r'(?<!\()(https?://[^\s\)\]]+)', response_text)
+    
+    discovered = []
+    for title, url in markdown_links:
+        discovered.append({"title": title, "url": url})
+        
+    extracted_urls = [u for t, u in markdown_links]
+    for url in raw_urls:
+        if url not in extracted_urls:
+            discovered.append({"title": "Web Discovered Source", "url": url})
+            
+    for item in discovered:
+        url = item['url']
+        title = item['title'][:200]
+        agency_inferred = infer_agency_from_url(url)
+        
+        try:
+            existing = supabase.table("guidelines").select("url").eq("url", url).execute()
+            if existing.data:
+                continue
+                
+            deleted = supabase.table("deleted_docs").select("url").eq("url", url).execute()
+            if deleted.data:
+                continue
+                
+            supabase.table("pending_urls").insert({
+                "url": url, 
+                "title": title, 
+                "agency": agency_inferred
+            }).execute()
+        except Exception:
+            pass
 
 def main():
     st.set_page_config(page_title="RA 가이드라인 대시보드", layout="wide")
@@ -243,22 +232,21 @@ def main():
     total, sum_cnt, sum_pct, emb_cnt, emb_pct = calculate_progress(df, embedded_urls)
     st.sidebar.metric("전체 수집 문서", f"{total} 건")
     st.sidebar.progress(sum_pct / 100, text=f"AI 요약: {sum_pct}% ({sum_cnt}/{total})")
-    st.sidebar.progress(embed_pct / 100, text=f"AI 임베딩: {embed_pct}% ({emb_cnt}/{total})")
+    st.sidebar.progress(emb_pct / 100, text=f"AI 임베딩: {emb_pct}% ({emb_cnt}/{total})")
     st.sidebar.divider()
 
     agencies = df['agency'].dropna().unique().tolist()
     selected_agencies = st.sidebar.multiselect(
-        "규제기관 (Agency)", options=agencies, default=agencies, format_func=lambda x: f"{get_agency_flag(x)} {x}",
-        key="agency_sidebar_multiselect_component"
+        "규제기관 (Agency)", options=agencies, default=agencies, format_func=lambda x: f"{get_agency_flag(x)} {x}"
     )
     categories = df['category'].dropna().unique().tolist()
-    selected_categories = st.sidebar.multiselect("키워드/카테고리", options=categories, default=categories, key="category_sidebar_multiselect_component")
+    selected_categories = st.sidebar.multiselect("키워드/카테고리", options=categories, default=categories)
     st.sidebar.divider()
 
     now = datetime.now()
     st.sidebar.header(f"💰 {now.year}년 {now.month}월 API 토큰 현황")
     
-    if st.sidebar.button("🔄 토큰 현황 수동 새로고침", use_container_width=True, key="token_refresh_action_button"):
+    if st.sidebar.button("🔄 토큰 현황 수동 새로고침", use_container_width=True):
         get_token_stats.clear()
         
     in_tokens, out_tokens, est_cost = get_token_stats()
@@ -271,7 +259,7 @@ def main():
         "📄 문서 검색", "🔄 신/구버전 비교", "⚖️ 다중 문서 비교", "💬 Guideline Chatbot", "🗂️ 사용 이력", "📤 PDF 수동 업로드"
     ])
 
-    filtered_df = df[(df['agency'].isin(selected_agencies)) & (df['category'].isin(selected_categories))].copy()
+    filtered_df = df[(df['agency'].isin(selected_agencies)) & (df['category'].isin(selected_categories))]
 
     def check_summary(text):
         if pd.isna(text) or str(text).strip() == "": return False
@@ -295,13 +283,11 @@ def main():
         st.sidebar.error(f"⚠️ 데이터 불일치 문서: {error_count}건\n\n(요약은 없으나 벡터 DB에 데이터가 존재합니다. '문서 검색' 탭에서 확인하십시오.)")
 
     with tab_search:
-        search_query = st.text_input("가이드라인 제목 검색", "", key="guideline_search_input_text_field")
+        search_query = st.text_input("가이드라인 제목 검색", "")
         tab1_df = filtered_df.copy()
         if search_query:
             tab1_df = tab1_df[tab1_df['title'].str.contains(search_query, case=False, na=False)]
-        
-        # 정적 물리 결합 및 정수 인덱스 빌드 적용
-        tab1_df = prioritize_pinned_documents(tab1_df)
+        tab1_df = tab1_df.sort_values(by=['status_score', 'title'], ascending=[False, True])
         st.subheader(f"검색 결과: {len(tab1_df)} 건")
 
         for index, row in tab1_df.iterrows():
@@ -312,13 +298,8 @@ def main():
                 if isinstance(row.get('ai_summary'), str) and "추출 불가" in row['ai_summary']: status_icon = "⚪ [추출 실패]"
                 else: status_icon = "⏳ [대기중]"
 
-            if row.get('is_pinned_flag') == True:
-                status_icon = "📌 [고정] " + status_icon
-
             agency_flag = get_agency_flag(row['agency']) 
 
-            # 중복 문서명 방어를 위해 고유 해시 기반 key 할당
-            safe_widget_id = re.sub(r'[^a-zA-Z0-9]', '', str(row.get('url', '')))[-20:]
             with st.expander(f"{status_icon} {row['title']} ({agency_flag} {row['agency']})"):
                 col1, col2 = st.columns([3, 1])
                 with col1:
@@ -327,7 +308,7 @@ def main():
                     st.markdown(f"[🔗 원본 문서 열기]({row['url']})")
                 
                 with col2:
-                    if st.button("🗑️ 문서 수동 삭제", key=f"delete_document_btn_{safe_widget_id}_{index}"):
+                    if st.button("🗑️ 문서 수동 삭제", key=f"del_doc_{index}"):
                         with st.spinner("문서 및 임베딩 데이터를 삭제 중입니다..."):
                             if delete_document_from_db(row['url'], row['title']):
                                 st.success("문서가 성공적으로 삭제되었습니다.")
@@ -359,7 +340,7 @@ def main():
         st.markdown("#### ⚖️ 다중 문서 수동 비교 분석")
         embedded_only_df = filtered_df[filtered_df['status_score'] == 4].copy() 
 
-        multi_search_query = st.text_input("비교할 문서 검색 (쉼표(,)로 구분하여 다중 OR 검색 가능)", "", key="multi_document_search_filter_input")
+        multi_search_query = st.text_input("비교할 문서 검색 (쉼표(,)로 구분하여 다중 OR 검색 가능)", "")
         if multi_search_query:
             keywords = [kw.strip() for kw in multi_search_query.split(",") if kw.strip()]
             if keywords:
@@ -369,24 +350,18 @@ def main():
         if embedded_only_df.empty:
             st.info("임베딩 및 요약이 정상적으로 완료된 문서가 없거나 검색 조건에 맞는 문서가 없습니다.")
         else:
-            # 정적 우선순위 결합 및 정수형 인덱스 정규화 보증
-            embedded_only_df = prioritize_pinned_documents(embedded_only_df)
-            embedded_only_df['상태'] = embedded_only_df['is_pinned_flag'].apply(lambda x: "📌 고정 문서" if x else "🟢 준비 완료")
-            
+            embedded_only_df['상태'] = "🟢 준비 완료"
             df_for_selection = embedded_only_df[['agency', 'title', 'category', '상태', 'url']].copy()
             df_for_selection['agency'] = df_for_selection['agency'].apply(lambda x: f"{get_agency_flag(x)} {x}")
             df_for_selection.insert(0, "비교 선택", False)
-            
-            # [해결 핵심] 완전 불변의 고정 고유 스트링 상수를 키로 지정
             edited_df = st.data_editor(
                 df_for_selection, hide_index=True,
                 column_config={"비교 선택": st.column_config.CheckboxColumn("비교 선택", default=False), "url": None},
-                disabled=["agency", "category", "title", "상태"], use_container_width=True,
-                key="absolute_static_key_for_multi_document_comparison_editor"
+                disabled=["agency", "category", "title", "상태"], use_container_width=True
             )
 
             selected_rows = edited_df[edited_df["비교 선택"]]
-            if st.button("비교 분석 실행", type="primary", key="execute_multi_comparison_trigger_button"):
+            if st.button("비교 분석 실행", type="primary"):
                 if len(selected_rows) < 2: 
                     st.warning("문서를 2개 이상 선택해야 합니다.")
                 else:
@@ -394,6 +369,7 @@ def main():
                     with st.spinner("문서 대조 중..."):
                         try:
                             comparison_result = rag_engine.compare_multiple_documents(selected_docs_info)
+                            # 고정된 에러 가로채기 조건을 변경하여 반환된 상세 오류 문자열을 그대로 노출
                             if "오류" in comparison_result: 
                                 st.error(comparison_result)
                             else:
@@ -411,7 +387,7 @@ def main():
         st.markdown("##### 📌 필수 참조 문서 선택 (선택 사항)")
         chat_embedded_only_df = filtered_df[filtered_df['status_score'] == 4].copy()
 
-        chat_search_query = st.text_input("참조할 문서 검색 (쉼표(,)로 구분하여 다중 검색 가능)", "", key="chatbot_reference_search_filter_input")
+        chat_search_query = st.text_input("참조할 문서 검색 (쉼표(,)로 구분하여 다중 검색 가능)", "", key="chat_multi_search")
         if chat_search_query:
             keywords = [kw.strip() for kw in chat_search_query.split(",") if kw.strip()]
             if keywords:
@@ -422,20 +398,16 @@ def main():
         if chat_embedded_only_df.empty:
             st.info("선택 가능한 문서가 없습니다.")
         else:
-            # 정적 우선순위 결합 및 정수형 인덱스 정규화 보증
-            chat_embedded_only_df = prioritize_pinned_documents(chat_embedded_only_df)
-            chat_embedded_only_df['상태'] = chat_embedded_only_df['is_pinned_flag'].apply(lambda x: "📌 고정 문서" if x else "🟢 준비 완료")
-            
+            chat_embedded_only_df['상태'] = "🟢 준비 완료"
             chat_df_for_selection = chat_embedded_only_df[['agency', 'title', 'category', '상태', 'url']].copy()
             chat_df_for_selection['agency'] = chat_df_for_selection['agency'].apply(lambda x: f"{get_agency_flag(x)} {x}")
             chat_df_for_selection.insert(0, "참조 선택", False)
             
-            # [해결 핵심] 타 편집기와 구조 해시가 겹치지 않도록 완전히 독립된 상수 명시
             edited_chat_df = st.data_editor(
                 chat_df_for_selection, hide_index=True,
                 column_config={"참조 선택": st.column_config.CheckboxColumn("참조 선택", default=False), "url": None},
                 disabled=["agency", "category", "title", "상태"], use_container_width=True,
-                key="absolute_static_key_for_chatbot_document_reference_editor"
+                key="chat_data_editor"
             )
             
             selected_chat_rows = edited_chat_df[edited_chat_df["참조 선택"]]
@@ -447,7 +419,7 @@ def main():
         if "current_prompt" not in st.session_state: st.session_state.current_prompt = None
 
         with st.form("chat_input_form", clear_on_submit=True):
-            user_input = st.text_area("질문을 입력하세요 (줄바꿈: Enter, 전송: Ctrl+Enter 또는 '전송' 버튼 클릭)", height=100, key="chatbot_query_entry_text_area")
+            user_input = st.text_area("질문을 입력하세요 (줄바꿈: Enter, 전송: Ctrl+Enter 또는 '전송' 버튼 클릭)", height=100)
             submitted = st.form_submit_button("전송", type="primary")
             if submitted and user_input.strip():
                 st.session_state.current_prompt = user_input
@@ -463,7 +435,10 @@ def main():
 
             with st.spinner("답변 생성 중... (외부 규정 참조 시 대기열에 자동 등록됩니다)"):
                 try:
+                    # 대화 맥락 유지를 위해 st.session_state.messages를 백엔드에 인자로 함께 전달
                     response_text, sources = rag_engine.ask_guideline(prompt, forced_docs_info, st.session_state.messages[:-1])
+                    
+                    # '오류가 발생' 문구 감지 시 단순 문구로 덮어쓰지 않고 상세 내용을 화면에 에러 컴포넌트로 띄우고 기록에 추가
                     if "오류가 발생" in response_text:
                         st.error(response_text)
                         st.session_state.messages.append({"role": "assistant", "content": response_text, "sources": []})
@@ -473,6 +448,7 @@ def main():
                         save_chat_to_db("assistant", response_text)
                         queue_web_discovered_urls(response_text)
                 except Exception as e:
+                    # UI 및 통신 단의 예외 발생 시 상세 Traceback 텍스트 구조화
                     detailed_ui_error = f"앱 호출 환경 내에서 시스템 오류가 발생했습니다.\n\n**오류 상세 내역:**\n```\n{str(e)}\n```"
                     st.error(detailed_ui_error)
                     st.session_state.messages.append({"role": "assistant", "content": detailed_ui_error, "sources": []})
@@ -484,13 +460,12 @@ def main():
         for i in range(0, len(st.session_state.messages), 2):
             pairs.append(st.session_state.messages[i:i+2])
             
-        # 역순 출력 루프 내 expander 위젯 고유 키 지정으로 중복 차단
-        for pair_idx, pair in enumerate(reversed(pairs)):
-            for msg_idx, msg in enumerate(pair):
+        for pair in reversed(pairs):
+            for msg in pair:
                 with st.chat_message(msg["role"]):
                     st.markdown(msg["content"])
                     if msg["role"] == "assistant" and msg.get("sources"):
-                        with st.expander("🔍 AI가 참고한 관련 내부 DB 문서 확인", key=f"chatbot_source_expander_{pair_idx}_{msg_idx}"):
+                        with st.expander("🔍 AI가 참고한 관련 내부 DB 문서 확인"):
                             for idx, source in enumerate(msg["sources"]):
                                 st.markdown(f"**[{idx+1}] 출처:** [{source.get('title', '원문 링크')}]({source['url']})")
 
@@ -552,7 +527,7 @@ def main():
                     try:
                         html_chat_content = markdown.markdown(md_chat, extensions=['tables'])
                         final_html_chat = f"<!DOCTYPE html><html><head><meta charset='utf-8'>{css_style}</head><body>{html_chat_content}</body></html>"
-                        st.download_button(label=f"💾 {date_str} 채팅 기록 다운로드 (.html)", data=final_html_chat, file_name=f"guideline_chat_{date_str}.html", mime="text/html", key=f"download_chat_history_button_{date_str}")
+                        st.download_button(label=f"💾 {date_str} 채팅 기록 다운로드 (.html)", data=final_html_chat, file_name=f"guideline_chat_{date_str}.html", mime="text/html", key=f"dl_chat_{date_str}")
                     except Exception: pass
             else:
                 st.info("최근 7일간 저장된 채팅 기록이 없습니다.")
@@ -579,9 +554,9 @@ def main():
                     with st.expander(f"분석 일시: {raw_time} | {file_title_prefix}"):
                         btn_col1, btn_col2 = st.columns([1, 1])
                         with btn_col1:
-                            st.download_button(label="📥 HTML 다운로드", data=final_html_analysis, file_name=file_name, mime="text/html", key=f"download_analysis_report_btn_{r['id']}")
+                            st.download_button(label="📥 HTML 다운로드", data=final_html_analysis, file_name=file_name, mime="text/html", key=f"dl_btn_{r['id']}")
                         with btn_col2:
-                            if st.button("🗑️ 기록 삭제", key=f"delete_analysis_history_record_btn_{r['id']}"):
+                            if st.button("🗑️ 기록 삭제", key=f"del_btn_{r['id']}"):
                                 delete_analysis_record(r['id'])
                                 st.rerun()
                         st.divider()
@@ -592,12 +567,12 @@ def main():
     with tab_upload:
         st.markdown("#### 📤 로컬 PDF 가이드라인 업로드 및 즉시 분석")
         col1, col2 = st.columns(2)
-        with col1: agency_input = st.selectbox("발행 기관 (Agency)", ["FDA", "EMA", "MHRA", "Health Canada", "ICH", "MFDS", "기타"], key="upload_tab_agency_selection_box")
-        with col2: category_input = st.text_input("카테고리/키워드 (예: CMC, 임상, 비임상)", key="upload_tab_category_text_input_field")
+        with col1: agency_input = st.selectbox("발행 기관 (Agency)", ["FDA", "EMA", "MHRA", "Health Canada", "ICH", "MFDS", "기타"])
+        with col2: category_input = st.text_input("카테고리/키워드 (예: CMC, 임상, 비임상)")
 
-        uploaded_file = st.file_uploader("PDF 파일 선택", type="pdf", key="upload_tab_file_uploader_component")
+        uploaded_file = st.file_uploader("PDF 파일 선택", type="pdf")
 
-        if st.button("즉시 데이터베이스 추가 및 분석 실행", type="primary", key="upload_tab_execution_submit_button"):
+        if st.button("즉시 데이터베이스 추가 및 분석 실행", type="primary"):
             if uploaded_file is not None and category_input:
                 with st.spinner("파일 업로드 및 AI 통합 분석 중... (수 분이 소요될 수 있습니다)"):
                     file_name = uploaded_file.name
