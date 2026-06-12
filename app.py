@@ -147,6 +147,11 @@ def infer_agency_from_url(url):
 
 def enhance_document_title(row):
     base_title = str(row.get('title', '제목 없음')).strip()
+    
+    # [수정] DB에서 is_pinned가 True로 설정된 경우 다른 정보(Ref, 파일명 등)를 붙이지 않고 원본 반환
+    if row.get('is_pinned', False):
+        return base_title
+        
     ref = str(row.get('ref_number', 'N/A')).strip()
     
     if ref and ref.lower() not in ['n/a', 'none', 'nan', '']:
@@ -304,12 +309,19 @@ def main():
                 if isinstance(row.get('ai_summary'), str) and "추출 불가" in row['ai_summary']: status_icon = "⚪ [추출 실패]"
                 else: status_icon = "⏳ [대기중]"
 
-            if row.get('is_pinned', False):
+            is_pinned = row.get('is_pinned', False)
+            if is_pinned:
                 status_icon = "📌 [고정] " + status_icon
 
             agency_flag = get_agency_flag(row['agency']) 
 
-            with st.expander(f"{status_icon} {row['title']} ({agency_flag} {row['agency']})"):
+            # [수정] 고정된 문서는 기관명 표시 없이 오로지 제목만 표시되도록 포맷팅 분기 처리
+            if is_pinned:
+                expander_label = f"{status_icon} {row['title']}"
+            else:
+                expander_label = f"{status_icon} {row['title']} ({agency_flag} {row['agency']})"
+
+            with st.expander(expander_label):
                 col1, col2 = st.columns([3, 1])
                 with col1:
                     db_added_date = convert_to_kst(row.get('created_at'))
