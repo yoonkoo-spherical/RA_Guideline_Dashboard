@@ -148,12 +148,11 @@ def infer_agency_from_url(url):
 def enhance_document_title(row):
     base_title = str(row.get('title', '제목 없음')).strip()
     
-    # [수정] DB에서 is_pinned가 True로 설정된 경우 다른 정보(Ref, 파일명 등)를 붙이지 않고 원본 반환
+    # 고정된 문서는 잡다한 식별자, 파일명 등은 생략하고 DB의 순수 title만 반환
     if row.get('is_pinned', False):
         return base_title
         
     ref = str(row.get('ref_number', 'N/A')).strip()
-    
     if ref and ref.lower() not in ['n/a', 'none', 'nan', '']:
         if ref not in base_title:
             return f"[{ref}] {base_title}"
@@ -309,17 +308,13 @@ def main():
                 if isinstance(row.get('ai_summary'), str) and "추출 불가" in row['ai_summary']: status_icon = "⚪ [추출 실패]"
                 else: status_icon = "⏳ [대기중]"
 
-            is_pinned = row.get('is_pinned', False)
-            if is_pinned:
+            if row.get('is_pinned', False):
                 status_icon = "📌 [고정] " + status_icon
 
             agency_flag = get_agency_flag(row['agency']) 
 
-            # [수정] 고정된 문서는 기관명 표시 없이 오로지 제목만 표시되도록 포맷팅 분기 처리
-            if is_pinned:
-                expander_label = f"{status_icon} {row['title']}"
-            else:
-                expander_label = f"{status_icon} {row['title']} ({agency_flag} {row['agency']})"
+            # [수정 적용] is_pinned 여부에 관계없이 제목과 기관(agency)을 모두 조합하여 표시
+            expander_label = f"{status_icon} {row['title']} ({agency_flag} {row['agency']})"
 
             with st.expander(expander_label):
                 col1, col2 = st.columns([3, 1])
@@ -374,6 +369,7 @@ def main():
             embedded_only_df = embedded_only_df.sort_values(by=['is_pinned', 'title'], ascending=[False, True]).reset_index(drop=True)
             embedded_only_df['상태'] = embedded_only_df.apply(lambda r: "📌 고정 완료" if r.get('is_pinned', False) else "🟢 준비 완료", axis=1)
             
+            # 여기서 선택하는 열(column)에 이미 'agency'와 'title'이 모두 포함되어 있으므로 화면에 둘 다 정상 표시됩니다.
             df_for_selection = embedded_only_df[['agency', 'title', 'category', '상태', 'url']].copy()
             df_for_selection['agency'] = df_for_selection['agency'].apply(lambda x: f"{get_agency_flag(x)} {x}")
             df_for_selection.insert(0, "비교 선택", False)
@@ -424,6 +420,7 @@ def main():
             chat_embedded_only_df = chat_embedded_only_df.sort_values(by=['is_pinned', 'title'], ascending=[False, True]).reset_index(drop=True)
             chat_embedded_only_df['상태'] = chat_embedded_only_df.apply(lambda r: "📌 고정 완료" if r.get('is_pinned', False) else "🟢 준비 완료", axis=1)
             
+            # 여기서 선택하는 열(column)에 이미 'agency'와 'title'이 모두 포함되어 있으므로 화면에 둘 다 정상 표시됩니다.
             chat_df_for_selection = chat_embedded_only_df[['agency', 'title', 'category', '상태', 'url']].copy()
             chat_df_for_selection['agency'] = chat_df_for_selection['agency'].apply(lambda x: f"{get_agency_flag(x)} {x}")
             chat_df_for_selection.insert(0, "참조 선택", False)
